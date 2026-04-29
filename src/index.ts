@@ -47,7 +47,15 @@ export type SDKConfig = {
 };
 
 export type APIErrorBody = {
-  error?: string;
+  error?:
+    | string
+    | {
+        type?: string;
+        code?: string;
+        message?: string;
+        details?: unknown;
+        [k: string]: unknown;
+      };
   message?: string;
   code?: string | number;
   details?: unknown;
@@ -80,17 +88,21 @@ export class SDKTimeoutError extends Error {
 
 // -------- Domain payloads --------
 
-// ✅ Backwards compatible: allow requestId/request_id + sessionId/session_id on event payloads
 export type TrackEventPayload = {
-  eventId: number; // numeric, defined in admin UI
-  userId: number | string;
-  itemId: number | string; // allow UUIDs or numeric IDs
+  type?: string;
+  eventType?: string;
+  event_type?: string;
+  eventId?: number | string;
+  event_id?: number | string;
+  userId?: number | string;
+  user_id?: number | string;
+  itemId?: string;
+  item_id?: string;
+  occurredAt?: number;
+  occurred_at?: number;
 
-  // optional correlation id (recommended)
   requestId?: string;
   request_id?: string;
-
-  // ✅ NEW: session correlation id (recommended)
   sessionId?: string;
   session_id?: string;
 
@@ -98,21 +110,30 @@ export type TrackEventPayload = {
 };
 
 export type ItemUpsertPayload = {
-  itemId: number | string; // allow UUIDs or numeric IDs
-  name: string;
-  description: string;
-  metadata: Record<string, any>;
+  id?: string;
+  itemId?: string;
+  item_id?: string;
+  name?: string;
+  description?: string;
+  metadata?: Record<string, any>;
+  [k: string]: unknown;
 };
 
 export type RecommendationOptions = {
   userId: number | string;
   contextId?: string;
+  contextKey?: string;
+  scope?: Record<string, unknown>;
   limit?: number;
+  startingAfter?: string;
+  starting_after?: string;
 };
 
 export type AutoRecommendationsOptions = {
   userId: number | string;
   contextId?: string; // optional: apply the same context filters while filling auto sections
+  contextKey?: string;
+  scope?: Record<string, unknown>;
   limit?: number; // quantity per section
   cursor?: string; // pass the last next_cursor returned by the API
   windowDays?: number; // optional override; API may choose to honor cursor continuity
@@ -121,29 +142,61 @@ export type AutoRecommendationsOptions = {
 };
 
 export type DeleteItemInput = {
-  itemId: string | number;
+  itemId?: string;
+  item_id?: string;
+  id?: string;
 };
 
 export type DeleteItemsResponse = {
   message: string;
-  itemId?: string | number;
-  itemIds: Array<string | number>;
+  object?: "deleted_item" | "list" | string;
+  id?: string;
+  itemId?: string;
+  itemIds: string[];
   deletedCount?: number;
+  data?: unknown[];
   processing_time_ms?: number;
 };
 
-// ✅ NEW: PATCH payload + response
 export type PatchItemInput = {
-  itemId: string | number;
+  itemId?: string;
+  item_id?: string;
+  id?: string;
   active?: boolean;
   [k: string]: unknown;
 };
 
 export type PatchItemResponse = {
-  message: string;
-  itemId: string | number;
+  id: string;
+  object?: "item" | string;
+  message?: string;
   active?: boolean;
+  updated_at?: number;
   processing_time_ms?: number;
+};
+
+export type RecommendationResource = {
+  id?: string;
+  object?: "recommendation" | string;
+  item_id?: string;
+  item?: {
+    id?: string;
+    object?: "item" | string;
+    name?: string;
+    description?: string;
+    metadata?: Record<string, any>;
+    score?: number;
+    [k: string]: unknown;
+  };
+  entity_id?: string;
+  name?: string;
+  description?: string;
+  score?: number;
+  rank?: number;
+  metadata?: Record<string, any>;
+  embedding?: number[];
+  items?: RecommendationResource[];
+  [k: string]: unknown;
 };
 
 // Updated response type to match API (incl. request_id)
@@ -171,15 +224,12 @@ export type RecommendationsResponse = {
     last_modified: string;
     embedding: string;
   };
-  recommendations: Array<{
-    entity_id: string;
-    name: string;
-    description: string;
-    score: number;
-    metadata?: Record<string, any>;
-    embedding?: number[];
-  }>;
+  object?: "list" | string;
+  data?: RecommendationResource[];
+  recommendations: RecommendationResource[];
   quantity?: number;
+  limit?: number;
+  has_more?: boolean;
   excluded_viewed_items?: {
     value: number | null;
     unit: string;
@@ -218,6 +268,74 @@ const normalizeOptionalString = (v: unknown): string | null => {
   if (typeof v !== "string") return null;
   const s = v.trim();
   return s ? s : null;
+};
+
+const normalizeApiBaseUrl = (url: string): string => {
+  const trimmed = url.replace(/\/+$/, "");
+  return /\/v\d+$/i.test(trimmed) ? trimmed : `${trimmed}/v1`;
+};
+
+const normalizeNonEmptyString = (v: unknown): string | null => {
+  if (typeof v !== "string" && typeof v !== "number") return null;
+  const s = String(v).trim();
+  return s ? s : null;
+};
+
+const isValidItemId = (v: unknown): v is string => {
+  return typeof v === "string" && /^itm_[A-Za-z0-9][A-Za-z0-9_-]*$/.test(v);
+};
+
+const getItemId = (input: Record<string, unknown> | null | undefined) => {
+  return normalizeNonEmptyString(input?.id ?? input?.item_id ?? input?.itemId);
+};
+
+const normalizeItemPayload = (input: ItemUpsertPayload): Record<string, unknown> => {
+  if (!input || typeof input !== "object") {
+    throw new Error("item payload must be an object");
+  }
+
+  const id = getItemId(input);
+  if (id && !isValidItemId(id)) {
+    throw new Error("item id must be a prefixed string like itm_abc123");
+  }
+
+  const {itemId: _itemId, item_id: _item_id, ...rest} = input;
+  return id ? {...rest, id} : rest;
+};
+
+const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown> => {
+  if (!data || typeof data !== "object") {
+    throw new Error("event payload must be an object");
+  }
+
+  const userId = normalizeNonEmptyString(data.user_id ?? data.userId);
+  const itemId = normalizeNonEmptyString(data.item_id ?? data.itemId);
+  const type = normalizeNonEmptyString(
+    data.type ?? data.event_type ?? data.eventType ?? data.event_id ?? data.eventId
+  );
+
+  if (!userId || !itemId || !type) {
+    throw new Error("type, userId, and itemId are required");
+  }
+
+  if (!isValidItemId(itemId)) {
+    throw new Error("itemId must be a prefixed string like itm_abc123");
+  }
+
+  const occurredAt =
+    typeof data.occurred_at === "number"
+      ? data.occurred_at
+      : typeof data.occurredAt === "number"
+      ? data.occurredAt
+      : Math.floor(Date.now() / 1000);
+
+  return {
+    ...data,
+    user_id: userId,
+    item_id: itemId,
+    type,
+    occurred_at: occurredAt,
+  };
 };
 
 const generateSessionId = (): string => {
@@ -278,7 +396,7 @@ export class NeuronSDK {
     if (!config.baseUrl || !config.accessToken) {
       throw new Error("baseUrl and accessToken are required");
     }
-    this.baseUrl = config.baseUrl.replace(/\/+$/, ""); // trim trailing slashes
+    this.baseUrl = normalizeApiBaseUrl(config.baseUrl);
     this.accessToken = config.accessToken;
     this.timeoutMs = config.timeoutMs ?? 10_000;
     this.maxRetries = config.maxRetries ?? 2;
@@ -339,7 +457,7 @@ export class NeuronSDK {
   }
 
   public setBaseUrl(url: string) {
-    this.baseUrl = url.replace(/\/+$/, "");
+    this.baseUrl = normalizeApiBaseUrl(url);
   }
 
   public setTimeout(ms: number) {
@@ -747,21 +865,12 @@ export class NeuronSDK {
 
   /**
    * Track an existing event occurrence.
-   * POST /events
+   * POST /v1/events
    */
   public async trackEvent<T = {success: true; id?: number}>(
     data: TrackEventPayload
   ): Promise<T> {
-    if (
-      !data ||
-      typeof data.eventId !== "number" ||
-      (typeof data.userId !== "number" && typeof data.userId !== "string") ||
-      (typeof data.itemId !== "number" && typeof data.itemId !== "string")
-    ) {
-      throw new Error(
-        "eventId must be a number; userId and itemId must be a string or number"
-      );
-    }
+    const normalized = normalizeEventPayload(data);
 
     // ✅ attach request_id if:
     // - propagation enabled
@@ -796,7 +905,7 @@ export class NeuronSDK {
       !existingSid && this.sessionId ? this.sessionId : undefined;
 
     const payload = {
-      ...data,
+      ...normalized,
 
       // normalize + attach
       ...(ridToAttach ? {request_id: ridToAttach} : {}),
@@ -818,41 +927,45 @@ export class NeuronSDK {
   }
 
   /**
-   * Create or update an item
-   * POST /items
+   * Create items.
+   * POST /v1/items
    */
-  public async upsertItem<T = {success: true; itemId: number | string}>(
-    data: ItemUpsertPayload
+  public async upsertItem<T = {success: true; itemId?: string}>(
+    data: ItemUpsertPayload | ItemUpsertPayload[]
   ): Promise<T> {
+    const payload = Array.isArray(data)
+      ? data.map((item) => normalizeItemPayload(item))
+      : normalizeItemPayload(data);
+
     return this.request<T>("/items", {
       method: "POST",
       headers: this.getHeaders(),
-      body: JSON.stringify(data),
+      body: JSON.stringify(payload),
     });
   }
 
+  public async createItem<T = {id: string; object: "item"}>(
+    data: ItemUpsertPayload
+  ): Promise<T> {
+    return this.upsertItem<T>(data);
+  }
+
   /**
-   * ✅ NEW: Patch (partial update) a single item.
-   * PATCH /items/{item_id}
+   * Update a single item.
+   * POST /v1/items/{item_id}
    */
   public async patchItem<T = PatchItemResponse>(
     input: PatchItemInput
   ): Promise<T> {
-    const itemId = input?.itemId;
+    const itemId = getItemId(input);
 
-    const isValidString =
-      typeof itemId === "string" && itemId.trim().length > 0;
-    const isValidPositiveInteger =
-      typeof itemId === "number" && Number.isInteger(itemId) && itemId > 0;
-
-    if (!(isValidString || isValidPositiveInteger)) {
+    if (!isValidItemId(itemId)) {
       throw new Error(
-        "itemId is required and must be a UUID string or positive integer"
+        "itemId is required and must be a prefixed string like itm_abc123"
       );
     }
 
-    // Build PATCH body (exclude itemId)
-    const {itemId: _ignore, ...patch} = input;
+    const {id: _id, itemId: _itemId, item_id: _item_id, ...patch} = input;
 
     if (!patch || Object.keys(patch).length === 0) {
       throw new Error(
@@ -861,7 +974,7 @@ export class NeuronSDK {
     }
 
     return this.request<T>(`/items/${encodeURIComponent(String(itemId))}`, {
-      method: "PATCH",
+      method: "POST",
       headers: this.getHeaders(),
       body: JSON.stringify(patch),
     });
@@ -871,7 +984,7 @@ export class NeuronSDK {
    * Convenience helper: enable/disable item
    */
   public async setItemActive<T = PatchItemResponse>(
-    itemId: string | number,
+    itemId: string,
     active: boolean
   ): Promise<T> {
     return this.patchItem<T>({itemId, active});
@@ -879,47 +992,56 @@ export class NeuronSDK {
 
   /**
    * Delete one or more items.
-   * DELETE /items
+   * DELETE /v1/items/{item_id}
    */
   public async deleteItems<T = DeleteItemsResponse>(
     items: DeleteItemInput | DeleteItemInput[]
   ): Promise<T> {
     const payload = Array.isArray(items) ? items : [items];
 
-    if (
-      payload.length === 0 ||
-      payload.some((entry) => {
-        const id = entry?.itemId;
-        const isValidString = typeof id === "string" && id.trim().length > 0;
-        const isValidPositiveInteger =
-          typeof id === "number" && Number.isInteger(id) && id > 0;
-        return !(isValidString || isValidPositiveInteger);
-      })
-    ) {
+    const itemIds = payload.map((entry) => getItemId(entry));
+    if (itemIds.length === 0 || itemIds.some((id) => !isValidItemId(id))) {
       throw new Error(
-        "itemId is required and must be a UUID string or positive integer"
+        "itemId is required and must be a prefixed string like itm_abc123"
       );
     }
 
-    const body = payload.length === 1 ? payload[0] : payload;
+    const responses = [];
+    for (const itemId of itemIds) {
+      responses.push(
+        await this.request<unknown>(
+          `/items/${encodeURIComponent(String(itemId))}`,
+          {
+            method: "DELETE",
+            headers: this.getHeaders(),
+          }
+        )
+      );
+    }
 
-    return this.request<T>("/items", {
-      method: "DELETE",
-      headers: this.getHeaders(),
-      body: JSON.stringify(body),
-    });
+    if (responses.length === 1) {
+      return responses[0] as T;
+    }
+
+    return {
+      message: "Items deleted successfully",
+      object: "list",
+      itemIds: itemIds as string[],
+      deletedCount: responses.length,
+      data: responses,
+    } as T;
   }
 
   /**
    * Get recommendations for a user
-   * GET /recommendations?user_id=...&context_id=...&quantity=...
+   * GET /v1/recommendations?user_id=...&context_id=...&limit=...
    *
    * ✅ Captures request_id for correlation if present.
    */
   public async getRecommendations(
     options: RecommendationOptions
   ): Promise<RecommendationsResponse> {
-    const {userId, contextId, limit} = options;
+    const {userId, contextId, contextKey, scope, limit, startingAfter, starting_after} = options;
     if (typeof userId !== "number" && typeof userId !== "string") {
       throw new Error("userId must be a string or number");
     }
@@ -927,8 +1049,11 @@ export class NeuronSDK {
     const url = new URL(`${this.baseUrl}/recommendations`);
     url.searchParams.set("user_id", String(userId));
     if (contextId) url.searchParams.set("context_id", contextId);
-    if (typeof limit === "number")
-      url.searchParams.set("quantity", String(limit));
+    if (contextKey) url.searchParams.set("context_key", contextKey);
+    if (scope) url.searchParams.set("scope", JSON.stringify(scope));
+    if (typeof limit === "number") url.searchParams.set("limit", String(limit));
+    if (startingAfter || starting_after)
+      url.searchParams.set("starting_after", String(startingAfter ?? starting_after));
 
     const res = await this.request<RecommendationsResponse>(url.toString(), {
       method: "GET",
@@ -944,7 +1069,7 @@ export class NeuronSDK {
 
   /**
    * Get the next auto-generated recommendation section.
-   * GET /recommendations?mode=auto&user_id=...&cursor=...&quantity=...
+   * GET /v1/recommendations?mode=auto&user_id=...&cursor=...&limit=...
    *
    * ✅ Captures request_id for correlation if present.
    */
@@ -954,6 +1079,8 @@ export class NeuronSDK {
     const {
       userId,
       contextId,
+      contextKey,
+      scope,
       limit,
       cursor,
       windowDays,
@@ -969,8 +1096,9 @@ export class NeuronSDK {
     url.searchParams.set("mode", "auto");
     url.searchParams.set("user_id", String(userId));
     if (contextId) url.searchParams.set("context_id", contextId);
-    if (typeof limit === "number")
-      url.searchParams.set("quantity", String(limit));
+    if (contextKey) url.searchParams.set("context_key", contextKey);
+    if (scope) url.searchParams.set("scope", JSON.stringify(scope));
+    if (typeof limit === "number") url.searchParams.set("limit", String(limit));
     if (cursor) url.searchParams.set("cursor", cursor);
     if (typeof windowDays === "number")
       url.searchParams.set("window_days", String(windowDays));

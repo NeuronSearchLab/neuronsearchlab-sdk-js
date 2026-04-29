@@ -16,7 +16,7 @@ import {NeuronSDK, configureLogger} from "@neuronsearchlab/sdk";
 configureLogger({level: "INFO"});
 
 const sdk = new NeuronSDK({
-  baseUrl: "https://api.neuronsearchlab.com",
+  baseUrl: "https://api.neuronsearchlab.com/v1",
   accessToken: process.env.NEURON_API_TOKEN!,
   // Optional batching controls (defaults shown)
   collateWindowSeconds: 3,
@@ -24,25 +24,30 @@ const sdk = new NeuronSDK({
   maxBufferedEvents: 5000,
 });
 
-const contentId = 3187; // integer content identifier you already store
+const itemId = "itm_3187";
 
 await sdk.trackEvent({
-  eventId: 1,
+  type: "view",
   userId: "42",
-  itemId: contentId, // pass your numeric contentId straight through
+  itemId,
   metadata: {action: "view"},
 });
 
 await sdk.upsertItem({
-  itemId: contentId,
+  id: itemId,
   name: "Premier League Highlights",
   description: "Matchday recap",
   metadata: {league: "EPL"},
 });
 
-await sdk.deleteItems({itemId: contentId});
+await sdk.patchItem({itemId, name: "Premier League Highlights v2"});
+await sdk.deleteItems({itemId});
 
-const recs = await sdk.getRecommendations({userId: "42", limit: 5});
+const recs = await sdk.getRecommendations({
+  userId: "42",
+  contextId: "ctx_homepage",
+  limit: 5,
+});
 ```
 
 ## Reference tables
@@ -69,9 +74,10 @@ const recs = await sdk.getRecommendations({userId: "42", limit: 5});
 
 | Method | Required fields | Notes |
 | --- | --- | --- |
-| `trackEvent(data)` | `eventId` (number), `userId` (string or number), `itemId` (number or string), `metadata` (object) | Buffers events in order and batches to the `/events` endpoint (single or array payloads). |
-| `upsertItem(data)` | `itemId` (number or UUID string), `name`, `description`, `metadata` | Adds or updates catalogue entries. |
-| `deleteItems(items)` | `itemId` (number or UUID string) | Accepts a single `{itemId}` object or an array for batch deletes. |
+| `trackEvent(data)` | `type`, `userId` (string or number), `itemId` (`itm_...` string), `metadata` (object) | Buffers events in order and batches to the `/v1/events` endpoint (single or array payloads). |
+| `upsertItem(data)` | `id` or `itemId` (`itm_...` string), `name`, `description`, `metadata` | Creates catalogue entries via `/v1/items`. |
+| `patchItem(data)` | `itemId` (`itm_...` string) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
+| `deleteItems(items)` | `itemId` (`itm_...` string) | Accepts a single `{itemId}` object or an array and deletes each item through `/v1/items/{item_id}`. |
 | `getRecommendations(options)` | `userId` (string or number) | Optional: `contextId` (string), `limit` (number). |
 
 ### Event batching behavior
