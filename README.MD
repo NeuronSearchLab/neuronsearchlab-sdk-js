@@ -24,7 +24,7 @@ const sdk = new NeuronSDK({
   maxBufferedEvents: 5000,
 });
 
-const itemId = "itm_3187";
+const itemId = "3187";
 
 await sdk.trackEvent({
   type: "view",
@@ -45,7 +45,7 @@ await sdk.deleteItems({itemId});
 
 const recs = await sdk.getRecommendations({
   userId: "42",
-  contextId: "ctx_homepage",
+  contextId: "homepage",
   limit: 5,
 });
 ```
@@ -74,10 +74,10 @@ const recs = await sdk.getRecommendations({
 
 | Method | Required fields | Notes |
 | --- | --- | --- |
-| `trackEvent(data)` | `type`, `userId` (string or number), `itemId` (`itm_...` string), `metadata` (object) | Buffers events in order and batches to the `/v1/events` endpoint (single or array payloads). |
-| `upsertItem(data)` | `id` or `itemId` (`itm_...` string), `name`, `description`, `metadata` | Creates catalogue entries via `/v1/items`. |
-| `patchItem(data)` | `itemId` (`itm_...` string) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
-| `deleteItems(items)` | `itemId` (`itm_...` string) | Accepts a single `{itemId}` object or an array and deletes each item through `/v1/items/{item_id}`. |
+| `trackEvent(data)` | `type`, `userId` (string or number), `itemId` (string or number), `metadata` (object) | Buffers events in order and batches to the `/v1/events` endpoint (single or array payloads). |
+| `upsertItem(data)` | `id` or `itemId` (string or number), `name`, `description`, `metadata` | Creates catalogue entries via `/v1/items`. |
+| `patchItem(data)` | `itemId` (string or number) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
+| `deleteItems(items)` | `itemId` (string or number) | Accepts a single `{itemId}` object or an array and deletes each item through `/v1/items/{item_id}`. |
 | `getRecommendations(options)` | `userId` (string or number) | Optional: `contextId` (string), `limit` (number). |
 
 ### Event batching behavior
