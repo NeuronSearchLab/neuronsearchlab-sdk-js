@@ -96,8 +96,8 @@ export type TrackEventPayload = {
   event_id?: number | string;
   userId?: number | string;
   user_id?: number | string;
-  itemId?: string;
-  item_id?: string;
+  itemId?: number | string;
+  item_id?: number | string;
   occurredAt?: number;
   occurred_at?: number;
 
@@ -110,9 +110,9 @@ export type TrackEventPayload = {
 };
 
 export type ItemUpsertPayload = {
-  id?: string;
-  itemId?: string;
-  item_id?: string;
+  id?: number | string;
+  itemId?: number | string;
+  item_id?: number | string;
   name?: string;
   description?: string;
   metadata?: Record<string, any>;
@@ -142,9 +142,9 @@ export type AutoRecommendationsOptions = {
 };
 
 export type DeleteItemInput = {
-  itemId?: string;
-  item_id?: string;
-  id?: string;
+  itemId?: number | string;
+  item_id?: number | string;
+  id?: number | string;
 };
 
 export type DeleteItemsResponse = {
@@ -159,9 +159,9 @@ export type DeleteItemsResponse = {
 };
 
 export type PatchItemInput = {
-  itemId?: string;
-  item_id?: string;
-  id?: string;
+  itemId?: number | string;
+  item_id?: number | string;
+  id?: number | string;
   active?: boolean;
   [k: string]: unknown;
 };
@@ -281,8 +281,8 @@ const normalizeNonEmptyString = (v: unknown): string | null => {
   return s ? s : null;
 };
 
-const isValidItemId = (v: unknown): v is string => {
-  return typeof v === "string" && /^itm_[A-Za-z0-9][A-Za-z0-9_-]*$/.test(v);
+const isValidItemId = (v: unknown): v is number | string => {
+  return normalizeNonEmptyString(v) !== null;
 };
 
 const getItemId = (input: Record<string, unknown> | null | undefined) => {
@@ -296,7 +296,7 @@ const normalizeItemPayload = (input: ItemUpsertPayload): Record<string, unknown>
 
   const id = getItemId(input);
   if (id && !isValidItemId(id)) {
-    throw new Error("item id must be a prefixed string like itm_abc123");
+    throw new Error("item id must be a non-empty string or number");
   }
 
   const {itemId: _itemId, item_id: _item_id, ...rest} = input;
@@ -319,7 +319,7 @@ const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown>
   }
 
   if (!isValidItemId(itemId)) {
-    throw new Error("itemId must be a prefixed string like itm_abc123");
+    throw new Error("itemId must be a non-empty string or number");
   }
 
   const occurredAt =
@@ -961,7 +961,7 @@ export class NeuronSDK {
 
     if (!isValidItemId(itemId)) {
       throw new Error(
-        "itemId is required and must be a prefixed string like itm_abc123"
+        "itemId is required and must be a non-empty string or number"
       );
     }
 
@@ -984,7 +984,7 @@ export class NeuronSDK {
    * Convenience helper: enable/disable item
    */
   public async setItemActive<T = PatchItemResponse>(
-    itemId: string,
+    itemId: number | string,
     active: boolean
   ): Promise<T> {
     return this.patchItem<T>({itemId, active});
@@ -1002,7 +1002,7 @@ export class NeuronSDK {
     const itemIds = payload.map((entry) => getItemId(entry));
     if (itemIds.length === 0 || itemIds.some((id) => !isValidItemId(id))) {
       throw new Error(
-        "itemId is required and must be a prefixed string like itm_abc123"
+        "itemId is required and must be a non-empty string or number"
       );
     }
 

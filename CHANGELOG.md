@@ -1,5 +1,11 @@
 # @neuronsearchlab/sdk
 
+## 1.19.1
+
+### Patch Changes
+
+- Preserve caller-provided item IDs and allow raw string or number identifiers across events and item APIs.
+
 ## 1.19.0
 
 ### Minor Changes

@@ -39,8 +39,8 @@ test("batches events within collate window and preserves order", async () => {
     },
   });
 
-  const p1 = sdk.trackEvent({type: "view", userId: "u1", itemId: "itm_i1"});
-  const p2 = sdk.trackEvent({type: "click", userId: "u1", itemId: "itm_i2"});
+  const p1 = sdk.trackEvent({type: "view", userId: "u1", itemId: "i1"});
+  const p2 = sdk.trackEvent({type: "click", userId: "u1", itemId: "i2"});
 
   await Promise.all([p1, p2]);
   assert.equal(requests.length, 1);
@@ -50,9 +50,9 @@ test("batches events within collate window and preserves order", async () => {
   assert.equal(body.length, 2);
   assert.equal(body[0].type, "view");
   assert.equal(body[0].user_id, "u1");
-  assert.equal(body[0].item_id, "itm_i1");
+  assert.equal(body[0].item_id, "i1");
   assert.equal(body[1].type, "click");
-  assert.equal(body[1].item_id, "itm_i2");
+  assert.equal(body[1].item_id, "i2");
   assert.ok(body[0].client_ts);
   assert.ok(body[1].client_ts);
 });
@@ -70,8 +70,8 @@ test("flushes immediately when maxBatchSize is reached", async () => {
     },
   });
 
-  const p1 = sdk.trackEvent({type: "view", userId: "u1", itemId: "itm_i3"});
-  const p2 = sdk.trackEvent({type: "click", userId: "u1", itemId: "itm_i4"});
+  const p1 = sdk.trackEvent({type: "view", userId: "u1", itemId: "i3"});
+  const p2 = sdk.trackEvent({type: "click", userId: "u1", itemId: "i4"});
 
   await Promise.all([p1, p2]);
   assert.equal(requests.length, 1);
@@ -101,7 +101,7 @@ test("retries after network failure and re-queues events", async () => {
   // speed up retry backoff for test determinism
   sdk.backoffMs = () => 5;
 
-  const p = sdk.trackEvent({type: "view", userId: "u1", itemId: "itm_i5"});
+  const p = sdk.trackEvent({type: "view", userId: "u1", itemId: "i5"});
   await wait(20);
   await p;
 
@@ -109,7 +109,7 @@ test("retries after network failure and re-queues events", async () => {
   const body = JSON.parse(requests.at(-1).init.body);
   const evt = Array.isArray(body) ? body[0] : body;
   assert.equal(evt.type, "view");
-  assert.equal(evt.item_id, "itm_i5");
+  assert.equal(evt.item_id, "i5");
 });
 
 test("preserves ordering across multiple batches", async () => {
@@ -126,9 +126,9 @@ test("preserves ordering across multiple batches", async () => {
   });
 
   await Promise.all([
-    sdk.trackEvent({type: "view", userId: "u1", itemId: "itm_i10"}),
-    sdk.trackEvent({type: "click", userId: "u1", itemId: "itm_i11"}),
-    sdk.trackEvent({type: "purchase", userId: "u1", itemId: "itm_i12"}),
+    sdk.trackEvent({type: "view", userId: "u1", itemId: "i10"}),
+    sdk.trackEvent({type: "click", userId: "u1", itemId: "i11"}),
+    sdk.trackEvent({type: "purchase", userId: "u1", itemId: "i12"}),
   ]);
 
   assert.equal(requests.length, 2);
@@ -163,7 +163,7 @@ test("lifecycle flush triggers a send on pagehide", async () => {
     },
   });
 
-  const p = sdk.trackEvent({type: "view", userId: "u1", itemId: "itm_i20"});
+  const p = sdk.trackEvent({type: "view", userId: "u1", itemId: "i20"});
   listeners.pagehide();
   await Promise.all([p, wait(20)]);
 
