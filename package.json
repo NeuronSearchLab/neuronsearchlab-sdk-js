@@ -47,5 +47,11 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "overrides": {
+    "rollup": "^4.59.0",
+    "fdir": {
+      "picomatch": "^4.0.4"
+    }
   }
 }
