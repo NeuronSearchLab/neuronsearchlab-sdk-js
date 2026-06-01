@@ -1,6 +1,6 @@
 # @neuronsearchlab/sdk
 
-Tiny TypeScript client and structured logger for the NeuronSearchLab API. It exposes a single `NeuronSDK` class (track events, upsert items, request recommendations) plus `configureLogger` for opt-in diagnostic output.
+Tiny TypeScript client and structured logger for the NeuronSearchLab Core API. It exposes a single `NeuronSDK` class (track events, upsert items, request recommendations, run search) plus `configureLogger` for opt-in diagnostic output.
 
 ## Installation
 
@@ -48,6 +48,14 @@ const recs = await sdk.getRecommendations({
   contextId: "homepage",
   limit: 5,
 });
+
+const results = await sdk.search({
+  query: "latest football highlights",
+  userId: "42",
+  contextId: "homepage",
+  limit: 5,
+  filter: ["category:sports"],
+});
 ```
 
 ## Reference tables
@@ -79,6 +87,7 @@ const recs = await sdk.getRecommendations({
 | `patchItem(data)` | `itemId` (string or number) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
 | `deleteItems(items)` | `itemId` (string or number) | Accepts a single `{itemId}` object or an array and deletes each item through `/v1/items/{item_id}`. |
 | `getRecommendations(options)` | `userId` (string or number) | Optional: `contextId` (string), `limit` (number). |
+| `search(options)` | `query` (string) | Posts query-driven retrieval requests to the Core API `/v1/search` AWS API Gateway endpoint. Optional: `userId`, `contextId`, `limit`, `filter`, `scope`, and hybrid search tuning fields. |
 
 ### Event batching behavior
 
@@ -86,6 +95,24 @@ const recs = await sdk.getRecommendations({
 - Flush triggers: collate window elapses, buffer reaches `maxBatchSize`, or lifecycle events (`beforeunload`, `pagehide`, `visibilitychange` when hidden). You can also call `sdk.flushEvents()` to flush immediately.
 - On transient failures, buffered events are re-queued and retried with exponential backoff (bounded by `maxEventRetries`). If the buffer exceeds `maxBufferedEvents`, the oldest events are dropped with a warning.
 - If the server rejects array payloads, the SDK automatically falls back to single-event sends for subsequent flushes (or set `disableArrayBatching: true` to force this upfront).
+
+### Search
+
+`search()` uses the public Core API data plane (`POST /v1/search`) and should be called from your backend with the same OAuth token flow as recommendations. It does not call the console Platform API.
+
+```ts
+const results = await sdk.search({
+  query: "waterproof trail shoes",
+  userId: "user-123",
+  contextId: "101",
+  limit: 10,
+  filter: ["category:footwear"],
+  queryRetrievalEnabled: true,
+  fusionMethod: "rrf",
+});
+```
+
+The response uses the same list envelope and recommendation item shape as `getRecommendations()`, with `url: "/v1/search"` and `query` included for attribution. The SDK captures the returned `request_id` so subsequent `trackEvent()` calls can be linked to the search result set.
 
 ## Development
 

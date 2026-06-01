@@ -141,6 +141,43 @@ export type AutoRecommendationsOptions = {
   servedCap?: number; // optional tuning
 };
 
+export type SearchStructuredFilter = {
+  column: string;
+  operator: string;
+  value: string | number | boolean;
+  logic?: string;
+};
+
+export type SearchOptions = {
+  query: string;
+  userId?: number | string;
+  user_id?: number | string;
+  contextId?: string;
+  context_id?: string;
+  contextKey?: string;
+  context_key?: string;
+  limit?: number;
+  filter?: string | string[];
+  filters?: string | string[] | SearchStructuredFilter[];
+  scope?: Record<string, unknown> | string;
+  queryRetrievalEnabled?: boolean;
+  query_retrieval_enabled?: boolean | string;
+  fusionMethod?: "rrf" | "weighted";
+  fusion_method?: "rrf" | "weighted";
+  semanticWeight?: number;
+  semantic_weight?: number | string;
+  keywordWeight?: number;
+  keyword_weight?: number | string;
+  keywordFields?: string[];
+  keyword_fields?: string[] | string;
+  requestId?: string;
+  request_id?: string;
+  debug?: boolean | string;
+  explain?: string;
+  includeSuppressed?: boolean | string;
+  include_suppressed?: boolean | string;
+};
+
 export type DeleteItemInput = {
   itemId?: number | string;
   item_id?: number | string;
@@ -248,6 +285,11 @@ export type RecommendationsResponse = {
   done?: boolean;
 };
 
+export type SearchResponse = RecommendationsResponse & {
+  query?: string;
+  url?: "/v1/search" | string;
+};
+
 // Legacy type for backwards compatibility
 export type Recommendation = {
   itemId: number | string;
@@ -336,6 +378,106 @@ const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown>
     type,
     occurred_at: occurredAt,
   };
+};
+
+const isStructuredFilterArray = (
+  value: unknown
+): value is SearchStructuredFilter[] => {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        typeof (entry as SearchStructuredFilter).column === "string" &&
+        typeof (entry as SearchStructuredFilter).operator === "string" &&
+        (entry as SearchStructuredFilter).value !== undefined
+    )
+  );
+};
+
+const serializeBoolean = (value: boolean | string | undefined): string | undefined => {
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return undefined;
+};
+
+const serializeNumber = (value: number | string | undefined): string | undefined => {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return undefined;
+};
+
+const normalizeSearchPayload = (options: SearchOptions): Record<string, unknown> => {
+  if (!options || typeof options !== "object") {
+    throw new Error("search options must be an object");
+  }
+
+  const query = normalizeOptionalString(options.query);
+  if (!query) {
+    throw new Error("query is required");
+  }
+
+  const payload: Record<string, unknown> = {query};
+  const userId = normalizeNonEmptyString(options.user_id ?? options.userId);
+  const contextId = normalizeOptionalString(options.context_id ?? options.contextId);
+  const contextKey = normalizeOptionalString(options.context_key ?? options.contextKey);
+  const requestId = normalizeOptionalString(options.request_id ?? options.requestId);
+
+  if (userId) payload.user_id = userId;
+  if (contextId) payload.context_id = contextId;
+  if (contextKey) payload.context_key = contextKey;
+  if (typeof options.limit === "number" && Number.isFinite(options.limit)) {
+    payload.limit = String(Math.floor(options.limit));
+  }
+  if (requestId) payload.request_id = requestId;
+
+  const filters = options.filter ?? options.filters;
+  if (typeof filters === "string" || (Array.isArray(filters) && filters.every((entry) => typeof entry === "string"))) {
+    payload.filter = filters;
+  }
+
+  if (typeof options.scope === "string" && options.scope.trim()) {
+    payload.scope = options.scope.trim();
+  } else if (options.scope && typeof options.scope === "object") {
+    payload.scope = JSON.stringify(options.scope);
+  } else if (isStructuredFilterArray(options.filters)) {
+    payload.scope = JSON.stringify({filters: options.filters});
+  }
+
+  const queryRetrievalEnabled = serializeBoolean(
+    options.query_retrieval_enabled ?? options.queryRetrievalEnabled
+  );
+  if (queryRetrievalEnabled !== undefined) {
+    payload.query_retrieval_enabled = queryRetrievalEnabled;
+  }
+
+  const fusionMethod = options.fusion_method ?? options.fusionMethod;
+  if (fusionMethod) payload.fusion_method = fusionMethod;
+
+  const semanticWeight = serializeNumber(options.semantic_weight ?? options.semanticWeight);
+  if (semanticWeight !== undefined) payload.semantic_weight = semanticWeight;
+
+  const keywordWeight = serializeNumber(options.keyword_weight ?? options.keywordWeight);
+  if (keywordWeight !== undefined) payload.keyword_weight = keywordWeight;
+
+  const keywordFields = options.keyword_fields ?? options.keywordFields;
+  if (Array.isArray(keywordFields)) {
+    payload.keyword_fields = keywordFields.map((field) => String(field).trim()).filter(Boolean).join(",");
+  } else if (typeof keywordFields === "string" && keywordFields.trim()) {
+    payload.keyword_fields = keywordFields.trim();
+  }
+
+  if (options.debug !== undefined) payload.debug = options.debug;
+  if (options.explain) payload.explain = options.explain;
+
+  const includeSuppressed = options.include_suppressed ?? options.includeSuppressed;
+  if (includeSuppressed !== undefined) {
+    payload.include_suppressed = includeSuppressed;
+  }
+
+  return payload;
 };
 
 const generateSessionId = (): string => {
@@ -1110,6 +1252,29 @@ export class NeuronSDK {
     const res = await this.request<RecommendationsResponse>(url.toString(), {
       method: "GET",
       headers: this.getHeaders(),
+    });
+
+    if (this.propagateRecommendationRequestId && res?.request_id) {
+      this.lastRecommendationRequestId = res.request_id;
+    }
+
+    return res;
+  }
+
+  /**
+   * Run query-driven search through the Core API.
+   * POST /v1/search
+   *
+   * This targets the public AWS API Gateway data plane, not the console
+   * Platform API. Captures request_id for subsequent event attribution.
+   */
+  public async search(options: SearchOptions): Promise<SearchResponse> {
+    const payload = normalizeSearchPayload(options);
+
+    const res = await this.request<SearchResponse>("/search", {
+      method: "POST",
+      headers: this.getHeaders(),
+      body: JSON.stringify(payload),
     });
 
     if (this.propagateRecommendationRequestId && res?.request_id) {

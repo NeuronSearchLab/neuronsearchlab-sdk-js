@@ -170,3 +170,64 @@ test("lifecycle flush triggers a send on pagehide", async () => {
   assert.equal(requests.length, 1);
   assert.equal(requests[0].init.keepalive, true);
 });
+
+test("search posts to the Core API search endpoint and propagates request id", async () => {
+  const requests = [];
+  const sdk = new NeuronSDK({
+    baseUrl: "https://api.example.com/v1",
+    accessToken: "token",
+    collateWindowSeconds: 0,
+    fetchImpl: async (url, init) => {
+      requests.push({url, init});
+      if (String(url).endsWith("/search")) {
+        return new Response(
+          JSON.stringify({
+            object: "list",
+            url: "/v1/search",
+            request_id: "66666666-6666-4666-8666-666666666666",
+            query: "fresh tech",
+            recommendations: [],
+            data: [],
+          }),
+          {status: 200}
+        );
+      }
+      return new Response(JSON.stringify({success: true}), {status: 200});
+    },
+  });
+
+  const result = await sdk.search({
+    query: " fresh tech ",
+    userId: "u1",
+    contextId: "101",
+    limit: 3,
+    filter: ["category:tech"],
+    queryRetrievalEnabled: true,
+    fusionMethod: "weighted",
+    semanticWeight: 0.7,
+    keywordWeight: 0.3,
+    keywordFields: ["name", "description"],
+  });
+
+  assert.equal(result.url, "/v1/search");
+  assert.equal(requests[0].url, "https://api.example.com/v1/search");
+  assert.equal(requests[0].init.method, "POST");
+
+  const payload = JSON.parse(requests[0].init.body);
+  assert.deepEqual(payload, {
+    query: "fresh tech",
+    user_id: "u1",
+    context_id: "101",
+    limit: "3",
+    filter: ["category:tech"],
+    query_retrieval_enabled: "true",
+    fusion_method: "weighted",
+    semantic_weight: "0.7",
+    keyword_weight: "0.3",
+    keyword_fields: "name,description",
+  });
+
+  await sdk.trackEvent({type: "click", userId: "u1", itemId: "itm_i30"});
+  const event = JSON.parse(requests[1].init.body);
+  assert.equal(event.request_id, "66666666-6666-4666-8666-666666666666");
+});

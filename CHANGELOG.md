@@ -1,5 +1,11 @@
 # @neuronsearchlab/sdk
 
+## 1.20.0
+
+### Minor Changes
+
+- Add `search()` for query-driven Core API search requests through the AWS API Gateway `/v1/search` endpoint.
+
 ## 1.19.1
 
 ### Patch Changes
