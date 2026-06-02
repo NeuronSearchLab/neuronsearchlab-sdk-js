@@ -227,7 +227,7 @@ test("search posts to the Core API search endpoint and propagates request id", a
     keyword_fields: "name,description",
   });
 
-  await sdk.trackEvent({type: "click", userId: "u1", itemId: "itm_i30"});
+  await sdk.trackEvent({type: "click", userId: "u1", itemId: "item-i30"});
   const event = JSON.parse(requests[1].init.body);
   assert.equal(event.request_id, "66666666-6666-4666-8666-666666666666");
 });

@@ -497,12 +497,12 @@ const generateSessionId = (): string => {
       return nodeCrypto.randomUUID();
     }
     if (nodeCrypto?.randomBytes) {
-      return `sess_${nodeCrypto.randomBytes(16).toString("hex")}`;
+      return nodeCrypto.randomBytes(16).toString("hex");
     }
   } catch {}
 
   // Last resort
-  return `sess_${Date.now().toString(36)}_${Math.random()
+  return `${Date.now().toString(36)}_${Math.random()
     .toString(36)
     .slice(2)}`;
 };
