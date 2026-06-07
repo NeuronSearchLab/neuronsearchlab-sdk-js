@@ -15,6 +15,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "test": "node --test",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "prepublishOnly": "npm run build"

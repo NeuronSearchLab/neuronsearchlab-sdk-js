@@ -77,6 +77,7 @@ const results = await sdk.search({
 | Docs hub | https://docs.neuronsearchlab.com |
 | API reference | https://docs.neuronsearchlab.com/api |
 | Quick start | https://docs.neuronsearchlab.com/get-started |
+| Native Swift SDK | https://github.com/NeuronSearchLab/neuronsearchlab-swift-sdk |
 
 ### Methods
 
