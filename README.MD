@@ -1,6 +1,6 @@
 # @neuronsearchlab/sdk
 
-Tiny TypeScript client and structured logger for the NeuronSearchLab Core API. It exposes a single `NeuronSDK` class (track events, upsert items, request recommendations, run search) plus `configureLogger` for opt-in diagnostic output.
+Official TypeScript SDK for the NeuronSearchLab Core API. It exposes a single `NeuronSDK` class for recommendation systems work: track events, sync catalogue items, request personalized recommendations, run product/content search, and capture request attribution for ranking quality analysis.
 
 ## Installation
 
@@ -77,6 +77,7 @@ const results = await sdk.search({
 | Docs hub | https://docs.neuronsearchlab.com |
 | API reference | https://docs.neuronsearchlab.com/api |
 | Quick start | https://docs.neuronsearchlab.com/get-started |
+| Recommendation systems reading path | https://www.neuronsearchlab.com/blog/recommendation-systems |
 | Native Swift SDK | https://github.com/NeuronSearchLab/neuronsearchlab-swift-sdk |
 
 ### Methods

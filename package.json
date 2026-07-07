@@ -1,7 +1,7 @@
 {
   "name": "@neuronsearchlab/sdk",
   "version": "1.20.0",
-  "description": "Official SDK for accessing NeuronSearchLab APIs",
+  "description": "Official TypeScript SDK for NeuronSearchLab recommendations, events, catalogue sync, and search.",
   "type": "module",
   "main": "dist/index.cjs",
   "types": "dist/index.d.ts",
@@ -30,11 +30,14 @@
     "url": "https://github.com/NeuronSearchLab/neuronsearchlab-sdk-js/issues"
   },
   "keywords": [
-    "sdk",
     "neuronsearchlab",
+    "recommendation-systems",
     "recommendations",
-    "ai",
-    "personalization"
+    "personalization",
+    "product-discovery",
+    "search",
+    "sdk",
+    "typescript"
   ],
   "repository": {
     "type": "git",
