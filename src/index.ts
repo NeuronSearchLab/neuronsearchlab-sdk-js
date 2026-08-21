@@ -89,15 +89,18 @@ export class SDKTimeoutError extends Error {
 // -------- Domain payloads --------
 
 export type TrackEventPayload = {
-  type?: string;
-  eventType?: string;
-  event_type?: string;
-  eventId?: number | string;
-  event_id?: number | string;
+  event?: number;
+  type?: number;
+  eventType?: number;
+  event_type?: number;
+  eventId?: number;
+  event_id?: number;
   userId?: number | string;
   user_id?: number | string;
-  itemId?: number | string;
-  item_id?: number | string;
+  itemId?: number;
+  item_id?: number;
+  contextId?: number;
+  context_id?: number;
   occurredAt?: number;
   occurred_at?: number;
 
@@ -106,13 +109,19 @@ export type TrackEventPayload = {
   sessionId?: string;
   session_id?: string;
 
+  /** Stable caller-owned event key used to deduplicate ingestion retries. */
+  deduplicationId?: string;
+  deduplication_id?: string;
+  /** Backwards-compatible aliases normalized to deduplication_id. */
+  idempotencyKey?: string;
+  idempotency_key?: string;
+  messageId?: string;
+  message_id?: string;
+
   [k: string]: unknown;
 };
 
 export type ItemUpsertPayload = {
-  id?: number | string;
-  itemId?: number | string;
-  item_id?: number | string;
   name?: string;
   description?: string;
   metadata?: Record<string, any>;
@@ -121,8 +130,7 @@ export type ItemUpsertPayload = {
 
 export type RecommendationOptions = {
   userId: number | string;
-  contextId?: string;
-  contextKey?: string;
+  contextId?: number;
   scope?: Record<string, unknown>;
   limit?: number;
   startingAfter?: string;
@@ -131,8 +139,7 @@ export type RecommendationOptions = {
 
 export type AutoRecommendationsOptions = {
   userId: number | string;
-  contextId?: string; // optional: apply the same context filters while filling auto sections
-  contextKey?: string;
+  contextId?: number; // optional: apply the same context filters while filling auto sections
   scope?: Record<string, unknown>;
   limit?: number; // quantity per section
   cursor?: string; // pass the last next_cursor returned by the API
@@ -152,10 +159,8 @@ export type SearchOptions = {
   query: string;
   userId?: number | string;
   user_id?: number | string;
-  contextId?: string;
-  context_id?: string;
-  contextKey?: string;
-  context_key?: string;
+  contextId?: number;
+  context_id?: number;
   limit?: number;
   filter?: string | string[];
   filters?: string | string[] | SearchStructuredFilter[];
@@ -179,32 +184,32 @@ export type SearchOptions = {
 };
 
 export type DeleteItemInput = {
-  itemId?: number | string;
-  item_id?: number | string;
-  id?: number | string;
+  itemId?: number;
+  item_id?: number;
+  id?: number;
 };
 
 export type DeleteItemsResponse = {
   message: string;
   object?: "deleted_item" | "list" | string;
-  id?: string;
-  itemId?: string;
-  itemIds: string[];
+  id?: number;
+  itemId?: number;
+  itemIds: number[];
   deletedCount?: number;
   data?: unknown[];
   processing_time_ms?: number;
 };
 
 export type PatchItemInput = {
-  itemId?: number | string;
-  item_id?: number | string;
-  id?: number | string;
+  itemId?: number;
+  item_id?: number;
+  id?: number;
   active?: boolean;
   [k: string]: unknown;
 };
 
 export type PatchItemResponse = {
-  id: string;
+  id: number;
   object?: "item" | string;
   message?: string;
   active?: boolean;
@@ -213,11 +218,11 @@ export type PatchItemResponse = {
 };
 
 export type RecommendationResource = {
-  id?: string;
+  id?: number;
   object?: "recommendation" | string;
-  item_id?: string;
+  item_id?: number;
   item?: {
-    id?: string;
+    id?: number;
     object?: "item" | string;
     name?: string;
     description?: string;
@@ -292,7 +297,7 @@ export type SearchResponse = RecommendationsResponse & {
 
 // Legacy type for backwards compatibility
 export type Recommendation = {
-  itemId: number | string;
+  itemId: number;
   score?: number;
   reason?: string;
   [k: string]: unknown;
@@ -323,12 +328,19 @@ const normalizeNonEmptyString = (v: unknown): string | null => {
   return s ? s : null;
 };
 
-const isValidItemId = (v: unknown): v is number | string => {
-  return normalizeNonEmptyString(v) !== null;
-};
+const isPositiveInteger = (v: unknown): v is number =>
+  typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+const isEventId = (v: unknown): v is number =>
+  typeof v === "number" && Number.isSafeInteger(v) && v !== 0;
 
 const getItemId = (input: Record<string, unknown> | null | undefined) => {
-  return normalizeNonEmptyString(input?.id ?? input?.item_id ?? input?.itemId);
+  const aliases = [input?.id, input?.item_id, input?.itemId].filter(
+    (value) => value !== undefined
+  );
+  if (new Set(aliases).size > 1) {
+    throw new Error("itemId aliases must contain the same integer");
+  }
+  return aliases[0];
 };
 
 const normalizeItemPayload = (input: ItemUpsertPayload): Record<string, unknown> => {
@@ -336,13 +348,11 @@ const normalizeItemPayload = (input: ItemUpsertPayload): Record<string, unknown>
     throw new Error("item payload must be an object");
   }
 
-  const id = getItemId(input);
-  if (id && !isValidItemId(id)) {
-    throw new Error("item id must be a non-empty string or number");
+  if (input.id !== undefined || input.item_id !== undefined || input.itemId !== undefined) {
+    throw new Error("item IDs are generated by NSL; omit id, itemId, and item_id when ingesting items");
   }
 
-  const {itemId: _itemId, item_id: _item_id, ...rest} = input;
-  return id ? {...rest, id} : rest;
+  return {...input};
 };
 
 const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown> => {
@@ -351,17 +361,29 @@ const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown>
   }
 
   const userId = normalizeNonEmptyString(data.user_id ?? data.userId);
-  const itemId = normalizeNonEmptyString(data.item_id ?? data.itemId);
-  const type = normalizeNonEmptyString(
-    data.type ?? data.event_type ?? data.eventType ?? data.event_id ?? data.eventId
-  );
+  const itemId = data.item_id ?? data.itemId;
+  const eventId =
+    data.event ?? data.event_id ?? data.eventId ?? data.event_type ?? data.eventType ?? data.type;
+  const contextId = data.context_id ?? data.contextId;
+  const rawDeduplicationId =
+    data.deduplication_id ??
+    data.deduplicationId ??
+    data.idempotency_key ??
+    data.idempotencyKey ??
+    data.message_id ??
+    data.messageId;
+  const deduplicationId = normalizeOptionalString(rawDeduplicationId);
 
-  if (!userId || !itemId || !type) {
-    throw new Error("type, userId, and itemId are required");
+  if (!userId || !isPositiveInteger(itemId) || !isEventId(eventId)) {
+    throw new Error("eventId must be a non-zero integer, itemId must be a positive integer, and userId is required");
   }
 
-  if (!isValidItemId(itemId)) {
-    throw new Error("itemId must be a non-empty string or number");
+  if (rawDeduplicationId !== undefined && !deduplicationId) {
+    throw new Error("deduplicationId must be a non-empty string when provided");
+  }
+
+  if (contextId !== undefined && !isPositiveInteger(contextId)) {
+    throw new Error("contextId must be a positive integer when provided");
   }
 
   const occurredAt =
@@ -371,12 +393,30 @@ const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown>
       ? data.occurredAt
       : Math.floor(Date.now() / 1000);
 
+  const {
+    deduplicationId: _deduplicationId,
+    idempotencyKey: _idempotencyKey,
+    idempotency_key: _idempotency_key,
+    messageId: _messageId,
+    message_id: _message_id,
+    event: _event,
+    eventId: _eventId,
+    eventType: _eventType,
+    event_type: _event_type,
+    type: _type,
+    itemId: _itemId,
+    contextId: _contextId,
+    ...rest
+  } = data;
+
   return {
-    ...data,
+    ...rest,
     user_id: userId,
     item_id: itemId,
-    type,
+    event_id: eventId,
+    ...(contextId !== undefined ? {context_id: contextId} : {}),
     occurred_at: occurredAt,
+    ...(deduplicationId ? {deduplication_id: deduplicationId} : {}),
   };
 };
 
@@ -421,13 +461,14 @@ const normalizeSearchPayload = (options: SearchOptions): Record<string, unknown>
 
   const payload: Record<string, unknown> = {query};
   const userId = normalizeNonEmptyString(options.user_id ?? options.userId);
-  const contextId = normalizeOptionalString(options.context_id ?? options.contextId);
-  const contextKey = normalizeOptionalString(options.context_key ?? options.contextKey);
+  const contextId = options.context_id ?? options.contextId;
   const requestId = normalizeOptionalString(options.request_id ?? options.requestId);
 
   if (userId) payload.user_id = userId;
-  if (contextId) payload.context_id = contextId;
-  if (contextKey) payload.context_key = contextKey;
+  if (contextId !== undefined) {
+    if (!isPositiveInteger(contextId)) throw new Error("contextId must be a positive integer");
+    payload.context_id = contextId;
+  }
   if (typeof options.limit === "number" && Number.isFinite(options.limit)) {
     payload.limit = String(Math.floor(options.limit));
   }
@@ -1072,7 +1113,7 @@ export class NeuronSDK {
    * Create items.
    * POST /v1/items
    */
-  public async upsertItem<T = {success: true; itemId?: string}>(
+  public async upsertItem<T = {success: true; itemId?: number}>(
     data: ItemUpsertPayload | ItemUpsertPayload[]
   ): Promise<T> {
     const payload = Array.isArray(data)
@@ -1086,7 +1127,7 @@ export class NeuronSDK {
     });
   }
 
-  public async createItem<T = {id: string; object: "item"}>(
+  public async createItem<T = {id: number; object: "item"}>(
     data: ItemUpsertPayload
   ): Promise<T> {
     return this.upsertItem<T>(data);
@@ -1101,10 +1142,8 @@ export class NeuronSDK {
   ): Promise<T> {
     const itemId = getItemId(input);
 
-    if (!isValidItemId(itemId)) {
-      throw new Error(
-        "itemId is required and must be a non-empty string or number"
-      );
+    if (!isPositiveInteger(itemId)) {
+      throw new Error("itemId is required and must be a positive integer returned by NSL");
     }
 
     const {id: _id, itemId: _itemId, item_id: _item_id, ...patch} = input;
@@ -1126,7 +1165,7 @@ export class NeuronSDK {
    * Convenience helper: enable/disable item
    */
   public async setItemActive<T = PatchItemResponse>(
-    itemId: number | string,
+    itemId: number,
     active: boolean
   ): Promise<T> {
     return this.patchItem<T>({itemId, active});
@@ -1142,10 +1181,8 @@ export class NeuronSDK {
     const payload = Array.isArray(items) ? items : [items];
 
     const itemIds = payload.map((entry) => getItemId(entry));
-    if (itemIds.length === 0 || itemIds.some((id) => !isValidItemId(id))) {
-      throw new Error(
-        "itemId is required and must be a non-empty string or number"
-      );
+    if (itemIds.length === 0 || itemIds.some((id) => !isPositiveInteger(id))) {
+      throw new Error("itemId is required and must be a positive integer returned by NSL");
     }
 
     const responses = [];
@@ -1168,7 +1205,7 @@ export class NeuronSDK {
     return {
       message: "Items deleted successfully",
       object: "list",
-      itemIds: itemIds as string[],
+      itemIds: itemIds as number[],
       deletedCount: responses.length,
       data: responses,
     } as T;
@@ -1183,15 +1220,17 @@ export class NeuronSDK {
   public async getRecommendations(
     options: RecommendationOptions
   ): Promise<RecommendationsResponse> {
-    const {userId, contextId, contextKey, scope, limit, startingAfter, starting_after} = options;
+    const {userId, contextId, scope, limit, startingAfter, starting_after} = options;
     if (typeof userId !== "number" && typeof userId !== "string") {
       throw new Error("userId must be a string or number");
     }
 
     const url = new URL(`${this.baseUrl}/recommendations`);
     url.searchParams.set("user_id", String(userId));
-    if (contextId) url.searchParams.set("context_id", contextId);
-    if (contextKey) url.searchParams.set("context_key", contextKey);
+    if (contextId !== undefined) {
+      if (!isPositiveInteger(contextId)) throw new Error("contextId must be a positive integer");
+      url.searchParams.set("context_id", String(contextId));
+    }
     if (scope) url.searchParams.set("scope", JSON.stringify(scope));
     if (typeof limit === "number") url.searchParams.set("limit", String(limit));
     if (startingAfter || starting_after)
@@ -1221,7 +1260,6 @@ export class NeuronSDK {
     const {
       userId,
       contextId,
-      contextKey,
       scope,
       limit,
       cursor,
@@ -1237,8 +1275,10 @@ export class NeuronSDK {
     const url = new URL(`${this.baseUrl}/recommendations`);
     url.searchParams.set("mode", "auto");
     url.searchParams.set("user_id", String(userId));
-    if (contextId) url.searchParams.set("context_id", contextId);
-    if (contextKey) url.searchParams.set("context_key", contextKey);
+    if (contextId !== undefined) {
+      if (!isPositiveInteger(contextId)) throw new Error("contextId must be a positive integer");
+      url.searchParams.set("context_id", String(contextId));
+    }
     if (scope) url.searchParams.set("scope", JSON.stringify(scope));
     if (typeof limit === "number") url.searchParams.set("limit", String(limit));
     if (cursor) url.searchParams.set("cursor", cursor);
