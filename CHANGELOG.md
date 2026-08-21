@@ -1,5 +1,11 @@
 # @neuronsearchlab/sdk
 
+## 2.0.0
+
+### Major Changes
+
+- 1f30ab1: Require dashboard-created integer event and context IDs, require NSL-generated integer item IDs, and return numeric IDs from item and recommendation APIs.
+
 ## 1.20.0
 
 ### Minor Changes
