@@ -24,20 +24,19 @@ const sdk = new NeuronSDK({
   maxBufferedEvents: 5000,
 });
 
-const itemId = "3187";
-
-await sdk.trackEvent({
-  type: "view",
-  userId: "42",
-  itemId,
-  metadata: {action: "view"},
-});
-
-await sdk.upsertItem({
-  id: itemId,
+const item = await sdk.upsertItem<{id: number}>({
   name: "Premier League Highlights",
   description: "Matchday recap",
   metadata: {league: "EPL"},
+});
+const itemId = item.id; // NSL-generated integer; persist this mapping
+
+await sdk.trackEvent({
+  eventId: 42, // from dashboard Event configuration
+  userId: "42",
+  itemId,
+  contextId: 101,
+  metadata: {action: "view"},
 });
 
 await sdk.patchItem({itemId, name: "Premier League Highlights v2"});
@@ -45,14 +44,14 @@ await sdk.deleteItems({itemId});
 
 const recs = await sdk.getRecommendations({
   userId: "42",
-  contextId: "homepage",
+  contextId: 101,
   limit: 5,
 });
 
 const results = await sdk.search({
   query: "latest football highlights",
   userId: "42",
-  contextId: "homepage",
+  contextId: 101,
   limit: 5,
   filter: ["category:sports"],
 });
@@ -84,16 +83,17 @@ const results = await sdk.search({
 
 | Method | Required fields | Notes |
 | --- | --- | --- |
-| `trackEvent(data)` | `type`, `userId` (string or number), `itemId` (string or number), `metadata` (object) | Buffers events in order and batches to the `/v1/events` endpoint (single or array payloads). |
-| `upsertItem(data)` | `id` or `itemId` (string or number), `name`, `description`, `metadata` | Creates catalogue entries via `/v1/items`. |
-| `patchItem(data)` | `itemId` (string or number) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
-| `deleteItems(items)` | `itemId` (string or number) | Accepts a single `{itemId}` object or an array and deletes each item through `/v1/items/{item_id}`. |
-| `getRecommendations(options)` | `userId` (string or number) | Optional: `contextId` (string), `limit` (number). |
+| `trackEvent(data)` | `eventId` (integer), `userId` (string or number), `itemId` (integer) | IDs must be the values created/returned by NSL. Optional `contextId` is also an integer. |
+| `upsertItem(data)` | `name`, `description`, `metadata` | Creates catalogue entries and returns an NSL-generated integer `id`. |
+| `patchItem(data)` | `itemId` (integer) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
+| `deleteItems(items)` | `itemId` (integer) | Deletes one or more NSL-generated item IDs. |
+| `getRecommendations(options)` | `userId` (string or number) | Optional: `contextId` (integer), `limit` (number). |
 | `search(options)` | `query` (string) | Posts query-driven retrieval requests to the Core API `/v1/search` AWS API Gateway endpoint. Optional: `userId`, `contextId`, `limit`, `filter`, `scope`, and hybrid search tuning fields. |
 
 ### Event batching behavior
 
 - Events are buffered in-memory with a `client_ts` timestamp when `trackEvent` is called.
+- For retry-safe ingestion, pass a stable `deduplicationId` generated and persisted by your application. The aliases `deduplication_id`, `idempotencyKey`, `idempotency_key`, `messageId`, and `message_id` are accepted and normalized to `deduplication_id`. The SDK intentionally does not auto-generate this value because a process retry must reuse the same key.
 - Flush triggers: collate window elapses, buffer reaches `maxBatchSize`, or lifecycle events (`beforeunload`, `pagehide`, `visibilitychange` when hidden). You can also call `sdk.flushEvents()` to flush immediately.
 - On transient failures, buffered events are re-queued and retried with exponential backoff (bounded by `maxEventRetries`). If the buffer exceeds `maxBufferedEvents`, the oldest events are dropped with a warning.
 - If the server rejects array payloads, the SDK automatically falls back to single-event sends for subsequent flushes (or set `disableArrayBatching: true` to force this upfront).
@@ -106,7 +106,7 @@ const results = await sdk.search({
 const results = await sdk.search({
   query: "waterproof trail shoes",
   userId: "user-123",
-  contextId: "101",
+  contextId: 101,
   limit: 10,
   filter: ["category:footwear"],
   queryRetrievalEnabled: true,

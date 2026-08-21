@@ -39,8 +39,8 @@ test("batches events within collate window and preserves order", async () => {
     },
   });
 
-  const p1 = sdk.trackEvent({type: "view", userId: "u1", itemId: "i1"});
-  const p2 = sdk.trackEvent({type: "click", userId: "u1", itemId: "i2"});
+  const p1 = sdk.trackEvent({eventId: 41, userId: "u1", itemId: 1});
+  const p2 = sdk.trackEvent({eventId: 42, userId: "u1", itemId: 2});
 
   await Promise.all([p1, p2]);
   assert.equal(requests.length, 1);
@@ -48,11 +48,11 @@ test("batches events within collate window and preserves order", async () => {
   const body = JSON.parse(requests[0].init.body);
   assert.equal(Array.isArray(body), true);
   assert.equal(body.length, 2);
-  assert.equal(body[0].type, "view");
+  assert.equal(body[0].event_id, 41);
   assert.equal(body[0].user_id, "u1");
-  assert.equal(body[0].item_id, "i1");
-  assert.equal(body[1].type, "click");
-  assert.equal(body[1].item_id, "i2");
+  assert.equal(body[0].item_id, 1);
+  assert.equal(body[1].event_id, 42);
+  assert.equal(body[1].item_id, 2);
   assert.ok(body[0].client_ts);
   assert.ok(body[1].client_ts);
 });
@@ -70,13 +70,61 @@ test("flushes immediately when maxBatchSize is reached", async () => {
     },
   });
 
-  const p1 = sdk.trackEvent({type: "view", userId: "u1", itemId: "i3"});
-  const p2 = sdk.trackEvent({type: "click", userId: "u1", itemId: "i4"});
+  const p1 = sdk.trackEvent({eventId: 41, userId: "u1", itemId: 3});
+  const p2 = sdk.trackEvent({eventId: 42, userId: "u1", itemId: 4});
 
   await Promise.all([p1, p2]);
   assert.equal(requests.length, 1);
   const body = JSON.parse(requests[0].init.body);
   assert.equal(body.length, 2);
+});
+
+test("normalizes caller-owned event idempotency aliases without generating keys", async () => {
+  const requests = [];
+  const sdk = new NeuronSDK({
+    baseUrl: "https://api.example.com/v1",
+    accessToken: "token",
+    collateWindowSeconds: 10,
+    maxBatchSize: 4,
+    fetchImpl: async (url, init) => {
+      requests.push({url, init});
+      return new Response(JSON.stringify({success: true}), {status: 200});
+    },
+  });
+
+  await Promise.all([
+    sdk.trackEvent({
+      eventId: 41,
+      userId: "u1",
+      itemId: 1,
+      deduplicationId: "event-dedup-1",
+    }),
+    sdk.trackEvent({
+      eventId: 42,
+      userId: "u1",
+      itemId: 2,
+      idempotency_key: "event-dedup-2",
+    }),
+    sdk.trackEvent({
+      eventId: 43,
+      userId: "u1",
+      itemId: 3,
+      messageId: "event-dedup-3",
+    }),
+    sdk.trackEvent({eventId: 41, userId: "u1", itemId: 4}),
+  ]);
+
+  assert.equal(requests.length, 1);
+  const body = JSON.parse(requests[0].init.body);
+  assert.deepEqual(
+    body.map((event) => event.deduplication_id),
+    ["event-dedup-1", "event-dedup-2", "event-dedup-3", undefined]
+  );
+  for (const event of body) {
+    assert.equal("deduplicationId" in event, false);
+    assert.equal("idempotency_key" in event, false);
+    assert.equal("messageId" in event, false);
+  }
 });
 
 test("retries after network failure and re-queues events", async () => {
@@ -101,15 +149,15 @@ test("retries after network failure and re-queues events", async () => {
   // speed up retry backoff for test determinism
   sdk.backoffMs = () => 5;
 
-  const p = sdk.trackEvent({type: "view", userId: "u1", itemId: "i5"});
+  const p = sdk.trackEvent({eventId: 41, userId: "u1", itemId: 5});
   await wait(20);
   await p;
 
   assert.equal(attempts, 2);
   const body = JSON.parse(requests.at(-1).init.body);
   const evt = Array.isArray(body) ? body[0] : body;
-  assert.equal(evt.type, "view");
-  assert.equal(evt.item_id, "i5");
+  assert.equal(evt.event_id, 41);
+  assert.equal(evt.item_id, 5);
 });
 
 test("preserves ordering across multiple batches", async () => {
@@ -126,9 +174,9 @@ test("preserves ordering across multiple batches", async () => {
   });
 
   await Promise.all([
-    sdk.trackEvent({type: "view", userId: "u1", itemId: "i10"}),
-    sdk.trackEvent({type: "click", userId: "u1", itemId: "i11"}),
-    sdk.trackEvent({type: "purchase", userId: "u1", itemId: "i12"}),
+    sdk.trackEvent({eventId: 41, userId: "u1", itemId: 10}),
+    sdk.trackEvent({eventId: 42, userId: "u1", itemId: 11}),
+    sdk.trackEvent({eventId: 43, userId: "u1", itemId: 12}),
   ]);
 
   assert.equal(requests.length, 2);
@@ -136,10 +184,10 @@ test("preserves ordering across multiple batches", async () => {
   const secondBatch = JSON.parse(requests[1].init.body);
   const normalize = (body) => (Array.isArray(body) ? body : [body]);
   assert.deepEqual(
-    normalize(firstBatch).map((e) => e.type),
-    ["view", "click"]
+    normalize(firstBatch).map((e) => e.event_id),
+    [41, 42]
   );
-  assert.deepEqual(normalize(secondBatch).map((e) => e.type), ["purchase"]);
+  assert.deepEqual(normalize(secondBatch).map((e) => e.event_id), [43]);
 });
 
 test("lifecycle flush triggers a send on pagehide", async () => {
@@ -163,7 +211,7 @@ test("lifecycle flush triggers a send on pagehide", async () => {
     },
   });
 
-  const p = sdk.trackEvent({type: "view", userId: "u1", itemId: "i20"});
+  const p = sdk.trackEvent({eventId: 41, userId: "u1", itemId: 20});
   listeners.pagehide();
   await Promise.all([p, wait(20)]);
 
@@ -199,7 +247,7 @@ test("search posts to the Core API search endpoint and propagates request id", a
   const result = await sdk.search({
     query: " fresh tech ",
     userId: "u1",
-    contextId: "101",
+    contextId: 101,
     limit: 3,
     filter: ["category:tech"],
     queryRetrievalEnabled: true,
@@ -217,7 +265,7 @@ test("search posts to the Core API search endpoint and propagates request id", a
   assert.deepEqual(payload, {
     query: "fresh tech",
     user_id: "u1",
-    context_id: "101",
+    context_id: 101,
     limit: "3",
     filter: ["category:tech"],
     query_retrieval_enabled: "true",
@@ -227,7 +275,7 @@ test("search posts to the Core API search endpoint and propagates request id", a
     keyword_fields: "name,description",
   });
 
-  await sdk.trackEvent({type: "click", userId: "u1", itemId: "item-i30"});
+  await sdk.trackEvent({eventId: 42, userId: "u1", itemId: 30});
   const event = JSON.parse(requests[1].init.body);
   assert.equal(event.request_id, "66666666-6666-4666-8666-666666666666");
 });
