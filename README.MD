@@ -17,6 +17,7 @@ configureLogger({level: "INFO"});
 
 const sdk = new NeuronSDK({
   baseUrl: "https://api.neuronsearchlab.com/v1",
+  // Static tokens remain supported.
   accessToken: process.env.NEURON_API_TOKEN!,
   // Optional batching controls (defaults shown)
   collateWindowSeconds: 3,
@@ -57,12 +58,68 @@ const results = await sdk.search({
 });
 ```
 
+## Server authentication
+
+Configure exactly one authentication method: `accessToken`, `tokenProvider`,
+or `oauthClientCredentials`.
+
+For long-running server integrations, client credentials are the recommended
+path. The SDK acquires short-lived tokens, caches them in memory, refreshes them
+before expiry, coalesces concurrent refreshes into one token request, and on a
+401 performs exactly one forced refresh and one retry.
+
+```ts
+const sdk = new NeuronSDK({
+  baseUrl: "https://api.neuronsearchlab.com/v1",
+  oauthClientCredentials: {
+    clientId: process.env.NSL_CLIENT_ID!,
+    clientSecret: process.env.NSL_CLIENT_SECRET!,
+    // These are the defaults and may be omitted for the hosted NSL issuer.
+    tokenUrl: "https://auth.neuronsearchlab.com/oauth2/token",
+    scope: ["neuronsearchlab-api/read", "neuronsearchlab-api/write"],
+  },
+});
+```
+
+> **Server-only:** OAuth client credentials contain a client secret. Never use
+> this configuration in browser, mobile, desktop, or other user-distributed
+> code. The SDK rejects it in browser runtimes. Keep credentials in a server
+> secret manager and expose only your own authenticated backend endpoint to
+> untrusted clients.
+
+If your application already owns token acquisition, provide an async source.
+The SDK caches the result; return expiry information to enable proactive
+refresh. A provider receives `forceRefresh: true` after a 401 and should bypass
+any cache it owns.
+
+```ts
+const sdk = new NeuronSDK({
+  baseUrl: "https://api.neuronsearchlab.com/v1",
+  tokenProvider: async ({forceRefresh}) => {
+    const token = await auth.getAccessToken({forceRefresh});
+    return {
+      accessToken: token.value,
+      expiresAt: token.expiresAt, // Date or Unix epoch milliseconds
+    };
+  },
+});
+```
+
+Plain string provider results are cached until a 401. Static `accessToken`
+values cannot be refreshed automatically; use `sdk.setAccessToken()` to rotate
+one explicitly.
+
 ## Reference tables
 
 ### Configuration
 
 | Key | Default | Description |
 | --- | --- | --- |
+| `baseUrl` | Required | Core API base URL. `/v1` is appended when no version suffix is present. |
+| `accessToken` | — | Static bearer token. Configure instead of the two dynamic auth options. |
+| `tokenProvider` | — | Async token source. May return a string or `{ accessToken, expiresAt?, expiresInSeconds? }`. |
+| `oauthClientCredentials` | — | Server-only OAuth client credentials with optional `tokenUrl`, `scope`, `audience`, and additional issuer parameters. |
+| `tokenExpirySkewMs` | `60000` | Refresh dynamic tokens before expiry; capped at half the issued token lifetime. |
 | `collateWindowSeconds` | `3` | Buffer events for this many seconds before flushing. |
 | `maxBatchSize` | `200` | Flush immediately once the buffer reaches this size. |
 | `maxBufferedEvents` | `5000` | Maximum number of buffered events; oldest are dropped (with a warning) beyond this limit. |

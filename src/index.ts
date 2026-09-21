@@ -1,6 +1,14 @@
 // src/index.ts
 
 import {logger} from "./logger";
+import {
+  AccessTokenManager,
+  SDKAuthError,
+} from "./auth";
+import type {
+  OAuthClientCredentialsConfig,
+  TokenProvider,
+} from "./auth";
 
 export {configureLogger, logger} from "./logger";
 export type {
@@ -10,9 +18,17 @@ export type {
   LoggerTransport,
 } from "./logger";
 
-export type SDKConfig = {
+export {SDKAuthError} from "./auth";
+export type {
+  OAuthClientCredentialsConfig,
+  TokenProvider,
+  TokenProviderContext,
+  TokenProviderReason,
+  TokenProviderResult,
+} from "./auth";
+
+type SDKBaseConfig = {
   baseUrl: string; // e.g. https://api.neuronsearchlab.com/v1
-  accessToken: string; // Bearer token
   timeoutMs?: number; // default 10_000
   maxRetries?: number; // retry on 429/5xx/timeouts, default 2
   fetchImpl?: typeof fetch; // custom fetch (e.g., undici/node-fetch for older Node)
@@ -44,7 +60,36 @@ export type SDKConfig = {
    * Set false if you *never* want the SDK to attach session_id automatically.
    */
   autoSessionId?: boolean;
+
+  /**
+   * Refresh cached provider/OAuth tokens this long before their expiry.
+   * The effective skew is capped at half of a token's lifetime. Default: 60s.
+   */
+  tokenExpirySkewMs?: number;
 };
+
+/** Configure exactly one authentication method. */
+export type SDKConfig = SDKBaseConfig &
+  (
+    | {
+        /** A static bearer token. It cannot be refreshed after a 401. */
+        accessToken: string;
+        tokenProvider?: never;
+        oauthClientCredentials?: never;
+      }
+    | {
+        accessToken?: never;
+        /** Async server-side token source. Results are cached in memory. */
+        tokenProvider: TokenProvider;
+        oauthClientCredentials?: never;
+      }
+    | {
+        accessToken?: never;
+        tokenProvider?: never;
+        /** OAuth 2.0 client credentials. Trusted server runtimes only. */
+        oauthClientCredentials: OAuthClientCredentialsConfig;
+      }
+  );
 
 export type APIErrorBody = {
   error?:
@@ -322,6 +367,33 @@ const normalizeApiBaseUrl = (url: string): string => {
   return /\/v\d+$/i.test(trimmed) ? trimmed : `${trimmed}/v1`;
 };
 
+const withBearerAuthorization = (
+  headers: HeadersInit | undefined,
+  accessToken: string
+): HeadersInit => {
+  const merged: Record<string, string> = {};
+  const addHeader = (key: string, value: unknown) => {
+    if (key.toLowerCase() === "authorization") return;
+    merged[key] = String(value);
+  };
+
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) addHeader(key, value);
+  } else if (
+    headers &&
+    typeof (headers as {forEach?: unknown}).forEach === "function"
+  ) {
+    (headers as {forEach(callback: (value: string, key: string) => void): void}).forEach(
+      (value, key) => addHeader(key, value)
+    );
+  } else if (headers) {
+    for (const [key, value] of Object.entries(headers)) addHeader(key, value);
+  }
+
+  merged.Authorization = `Bearer ${accessToken}`;
+  return merged;
+};
+
 const normalizeNonEmptyString = (v: unknown): string | null => {
   if (typeof v !== "string" && typeof v !== "number") return null;
   const s = String(v).trim();
@@ -550,7 +622,7 @@ const generateSessionId = (): string => {
 
 export class NeuronSDK {
   private baseUrl: string;
-  private accessToken: string;
+  private auth: AccessTokenManager;
   private timeoutMs: number;
   private maxRetries: number;
   private fetchImpl: typeof fetch;
@@ -576,14 +648,28 @@ export class NeuronSDK {
   private sessionId: string | null = null;
 
   constructor(config: SDKConfig) {
-    if (!config.baseUrl || !config.accessToken) {
-      throw new Error("baseUrl and accessToken are required");
+    if (!config?.baseUrl) {
+      throw new Error("baseUrl is required");
     }
     this.baseUrl = normalizeApiBaseUrl(config.baseUrl);
-    this.accessToken = config.accessToken;
     this.timeoutMs = config.timeoutMs ?? 10_000;
     this.maxRetries = config.maxRetries ?? 2;
     this.fetchImpl = config.fetchImpl ?? (globalThis.fetch as typeof fetch);
+
+    if (!this.fetchImpl) {
+      throw new Error(
+        "fetch is not available in this environment. Provide config.fetchImpl (e.g., undici or node-fetch)."
+      );
+    }
+
+    this.auth = new AccessTokenManager({
+      accessToken: config.accessToken,
+      tokenProvider: config.tokenProvider,
+      oauthClientCredentials: config.oauthClientCredentials,
+      tokenExpirySkewMs: config.tokenExpirySkewMs,
+      fetchImpl: this.fetchImpl,
+      timeoutMs: this.timeoutMs,
+    });
     this.collateWindowMs = (config.collateWindowSeconds ?? 3) * 1000;
     this.maxBatchSize = config.maxBatchSize ?? 200;
     this.maxBufferedEvents = config.maxBufferedEvents ?? 5000;
@@ -599,12 +685,6 @@ export class NeuronSDK {
 
     if (this.autoSessionId && !this.sessionId) {
       this.sessionId = generateSessionId();
-    }
-
-    if (!this.fetchImpl) {
-      throw new Error(
-        "fetch is not available in this environment. Provide config.fetchImpl (e.g., undici or node-fetch)."
-      );
     }
 
     this.registerLifecycleFlush();
@@ -636,7 +716,7 @@ export class NeuronSDK {
   }
 
   public setAccessToken(token: string) {
-    this.accessToken = token;
+    this.auth.setStaticAccessToken(token);
   }
 
   public setBaseUrl(url: string) {
@@ -645,6 +725,7 @@ export class NeuronSDK {
 
   public setTimeout(ms: number) {
     this.timeoutMs = ms;
+    this.auth.setTimeoutMs(ms);
   }
 
   /**
@@ -685,7 +766,6 @@ export class NeuronSDK {
   private getHeaders(extra?: HeadersInit): HeadersInit {
     return {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${this.accessToken}`,
       ...(extra ?? {}),
     };
   }
@@ -703,12 +783,15 @@ export class NeuronSDK {
 
     const retryOn = init.retryOn ?? [429, 500, 502, 503, 504];
     let attempt = 0;
+    let authorizationRetryUsed = false;
     const requestId =
       logger.shouldLog("DEBUG") || logger.isPerformanceLoggingEnabled()
         ? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
         : undefined;
 
     while (true) {
+      const authToken = await this.auth.getToken();
+      const headers = withBearerAuthorization(init.headers, authToken.value);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
       const startTime = logger.isPerformanceLoggingEnabled() ? Date.now() : 0;
@@ -728,6 +811,7 @@ export class NeuronSDK {
       try {
         const res = await this.fetchImpl(url, {
           ...init,
+          headers,
           signal: controller.signal,
         });
         clearTimeout(timeout);
@@ -762,6 +846,23 @@ export class NeuronSDK {
         }
 
         const raw = await res.text().catch(() => "");
+
+        if (
+          res.status === 401 &&
+          !authorizationRetryUsed &&
+          this.auth.isRefreshable()
+        ) {
+          authorizationRetryUsed = true;
+          await this.auth.refreshAfterUnauthorized(authToken.generation);
+          if (logger.shouldLog("INFO")) {
+            logger.info("Retrying request after refreshing authorization", {
+              method,
+              requestId,
+            });
+          }
+          continue;
+        }
+
         if (logger.shouldLog("WARN")) {
           logger.warn("HTTP response not OK", {
             method,
@@ -812,6 +913,10 @@ export class NeuronSDK {
         });
       } catch (err: any) {
         clearTimeout(timeout);
+
+        if (err instanceof SDKHttpError || err instanceof SDKAuthError) {
+          throw err;
+        }
 
         if (err?.name === "AbortError") {
           if (attempt < this.maxRetries) {
@@ -947,6 +1052,16 @@ export class NeuronSDK {
           batch.forEach((entry) => entry.resolve(response));
           this.flushRetryCount = 0;
         } catch (err: any) {
+          const retryable =
+            !(err instanceof SDKHttpError) ||
+            [429, 500, 502, 503, 504].includes(err.status);
+
+          if (!retryable) {
+            this.flushRetryCount = 0;
+            batch.forEach((entry) => entry.reject(err));
+            continue;
+          }
+
           this.eventBuffer = batch.concat(this.eventBuffer);
           this.trimBufferIfNeeded();
           this.flushRetryCount += 1;
@@ -1003,7 +1118,11 @@ export class NeuronSDK {
           options
         );
       } catch (err: any) {
-        if (!this.arrayBatchingRejected && err instanceof SDKHttpError) {
+        if (
+          !this.arrayBatchingRejected &&
+          err instanceof SDKHttpError &&
+          [400, 405, 413, 415, 422].includes(err.status)
+        ) {
           this.arrayBatchingRejected = true;
           if (logger.shouldLog("WARN")) {
             logger.warn(

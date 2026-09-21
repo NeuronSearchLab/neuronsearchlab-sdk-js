@@ -52,7 +52,14 @@ const DEFAULT_CONFIG: Required<Omit<LoggerConfig, "transport">> & {
   level: "INFO",
   enableNetworkBodyLogging: false,
   enablePerformanceLogging: false,
-  redactKeys: ["accessToken", "authorization", "Authorization"],
+  redactKeys: [
+    "accessToken",
+    "access_token",
+    "clientSecret",
+    "client_secret",
+    "authorization",
+    "Authorization",
+  ],
   transport(entry) {
     const method =
       entry.level === "TRACE" || entry.level === "DEBUG"
