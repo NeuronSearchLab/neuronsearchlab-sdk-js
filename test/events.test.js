@@ -279,3 +279,67 @@ test("search posts to the Core API search endpoint and propagates request id", a
   const event = JSON.parse(requests[1].init.body);
   assert.equal(event.request_id, "66666666-6666-4666-8666-666666666666");
 });
+
+test("a query without an item is sent as a search event", async () => {
+  const requests = [];
+  const sdk = new NeuronSDK({
+    baseUrl: "https://api.example.com/v1",
+    accessToken: "token",
+    collateWindowSeconds: 0,
+    fetchImpl: async (url, init) => {
+      requests.push({url, init});
+      return new Response(JSON.stringify({success: true}), {status: 200});
+    },
+  });
+
+  await sdk.trackSearch({userId: "u1", query: " trail shoes ", resultItemIds: [3, 1, 2]});
+  const [event] = [].concat(JSON.parse(requests[0].init.body));
+  assert.equal(requests[0].url, "https://api.example.com/v1/events");
+  assert.equal(event.user_id, "u1");
+  assert.equal(event.query, "trail shoes");
+  assert.deepEqual(event.result_item_ids, [3, 1, 2]);
+  assert.equal("item_id" in event, false);
+  assert.equal("event_id" in event, false);
+  assert.equal("resultItemIds" in event, false);
+
+  // With an item it stays an item event that remembers its search.
+  await sdk.trackEvent({eventId: 42, userId: "u1", itemId: 3, query: "trail shoes"});
+  const [click] = [].concat(JSON.parse(requests[1].init.body));
+  assert.equal(click.item_id, 3);
+  assert.equal(click.event_id, 42);
+  assert.equal(click.query, "trail shoes");
+});
+
+test("rejects malformed search events before sending", async () => {
+  const sdk = new NeuronSDK({
+    baseUrl: "https://api.example.com/v1",
+    accessToken: "token",
+    fetchImpl: async () => new Response("{}", {status: 200}),
+  });
+  await assert.rejects(() => sdk.trackSearch({userId: "u1", query: "  "}), /query is required/);
+  await assert.rejects(() => sdk.trackEvent({userId: "u1"}), /search event/);
+  await assert.rejects(
+    () => sdk.trackEvent({eventId: 42, userId: "u1", itemId: 3, resultItemIds: [1]}),
+    /only accepted on a search event/
+  );
+  await assert.rejects(() => sdk.trackSearch({userId: "u1", query: "x", resultItemIds: ["sku-1"]}), /positive integer/);
+});
+
+test("search forwards the ids your own engine showed", async () => {
+  const requests = [];
+  const sdk = new NeuronSDK({
+    baseUrl: "https://api.example.com/v1",
+    accessToken: "token",
+    fetchImpl: async (url, init) => {
+      requests.push({url, init});
+      return new Response(
+        JSON.stringify({object: "list", url: "/v1/search", data: [], recommendations: [], search: {source: "client"}}),
+        {status: 200}
+      );
+    },
+  });
+  const result = await sdk.search({query: "trail shoes", userId: "u1", resultItemIds: [7, 8]});
+  assert.deepEqual(JSON.parse(requests[0].init.body), {query: "trail shoes", user_id: "u1", result_item_ids: [7, 8]});
+  assert.equal(result.search.source, "client");
+  await assert.rejects(() => sdk.search({query: "x", resultItemIds: [0]}), /positive integer/);
+});

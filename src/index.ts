@@ -149,6 +149,17 @@ export type TrackEventPayload = {
   occurredAt?: number;
   occurred_at?: number;
 
+  /**
+   * What the user searched for. An event with a query and no itemId is a
+   * search event: eventId is then optional and defaults to the event your
+   * `search` signal is bound to. With an itemId, the query is kept on the
+   * item event as the search the user reached it from.
+   */
+  query?: string;
+  /** Item ids your own search engine showed for `query`, in rank order. */
+  resultItemIds?: number[];
+  result_item_ids?: number[];
+
   requestId?: string;
   request_id?: string;
   sessionId?: string;
@@ -202,6 +213,13 @@ export type SearchStructuredFilter = {
 
 export type SearchOptions = {
   query: string;
+  /**
+   * Your own search engine ran `query` and showed these item ids, in rank
+   * order. NSL records the search with them and returns recommendations that
+   * complement them; these ids are left out of the response.
+   */
+  resultItemIds?: number[];
+  result_item_ids?: number[];
   userId?: number | string;
   user_id?: number | string;
   contextId?: number;
@@ -317,6 +335,8 @@ export type RecommendationsResponse = {
   quantity?: number;
   limit?: number;
   has_more?: boolean;
+  /** Present when the user's recent searches steered this response. */
+  search_intent?: SearchIntentSummary;
   excluded_viewed_items?: {
     value: number | null;
     unit: string;
@@ -338,6 +358,29 @@ export type RecommendationsResponse = {
 export type SearchResponse = RecommendationsResponse & {
   query?: string;
   url?: "/v1/search" | string;
+  search?: {
+    /** "nsl" when NSL ran the search; "client" when you sent resultItemIds. */
+    source: "nsl" | "client";
+    vector: "query" | "query+results" | "results" | null;
+    result_item_ids_received: number;
+    /** False when the request named no user_id or anonymous_id. */
+    event_recorded: boolean;
+  };
+};
+
+/** How much a user's recent searches steered a recommendation response. */
+export type SearchIntentSummary = {
+  /** Their searches' share of their recent event weight, 0-1. */
+  share: number;
+  queries: Array<{
+    query: string;
+    count: number;
+    event_weight: number;
+    share: number;
+    last_searched_at: string;
+  }>;
+  candidates_added: number;
+  candidates_rescored: number;
 };
 
 // Legacy type for backwards compatibility
@@ -445,9 +488,26 @@ const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown>
     data.message_id ??
     data.messageId;
   const deduplicationId = normalizeOptionalString(rawDeduplicationId);
+  const query = normalizeOptionalString(data.query);
+  const isSearch = itemId === undefined && query !== null;
+  const resultItemIds = data.result_item_ids ?? data.resultItemIds;
 
-  if (!userId || !isPositiveInteger(itemId) || !isEventId(eventId)) {
-    throw new Error("eventId must be a non-zero integer, itemId must be a positive integer, and userId is required");
+  if (isSearch) {
+    if (!userId) throw new Error("userId is required");
+    if (eventId !== undefined && !isEventId(eventId)) {
+      throw new Error("eventId must be a non-zero integer when provided");
+    }
+  } else if (!userId || !isPositiveInteger(itemId) || !isEventId(eventId)) {
+    throw new Error(
+      "eventId must be a non-zero integer, itemId must be a positive integer, and userId is required (or send query without itemId for a search event)"
+    );
+  }
+
+  if (resultItemIds !== undefined) {
+    if (!isSearch) throw new Error("resultItemIds is only accepted on a search event: a query without itemId");
+    if (!Array.isArray(resultItemIds) || !resultItemIds.every(isPositiveInteger)) {
+      throw new Error("resultItemIds must be an array of positive integer item ids returned by NSL");
+    }
   }
 
   if (rawDeduplicationId !== undefined && !deduplicationId) {
@@ -478,14 +538,19 @@ const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown>
     type: _type,
     itemId: _itemId,
     contextId: _contextId,
+    query: _query,
+    resultItemIds: _resultItemIds,
+    result_item_ids: _result_item_ids,
     ...rest
   } = data;
 
   return {
     ...rest,
     user_id: userId,
-    item_id: itemId,
-    event_id: eventId,
+    ...(itemId !== undefined ? {item_id: itemId} : {}),
+    ...(eventId !== undefined ? {event_id: eventId} : {}),
+    ...(query !== null ? {query} : {}),
+    ...(resultItemIds !== undefined ? {result_item_ids: resultItemIds} : {}),
     ...(contextId !== undefined ? {context_id: contextId} : {}),
     occurred_at: occurredAt,
     ...(deduplicationId ? {deduplication_id: deduplicationId} : {}),
@@ -540,6 +605,13 @@ const normalizeSearchPayload = (options: SearchOptions): Record<string, unknown>
   if (contextId !== undefined) {
     if (!isPositiveInteger(contextId)) throw new Error("contextId must be a positive integer");
     payload.context_id = contextId;
+  }
+  const resultItemIds = options.result_item_ids ?? options.resultItemIds;
+  if (resultItemIds !== undefined) {
+    if (!Array.isArray(resultItemIds) || !resultItemIds.every(isPositiveInteger)) {
+      throw new Error("resultItemIds must be an array of positive integer item ids returned by NSL");
+    }
+    payload.result_item_ids = resultItemIds;
   }
   if (typeof options.limit === "number" && Number.isFinite(options.limit)) {
     payload.limit = String(Math.floor(options.limit));
@@ -1217,6 +1289,22 @@ export class NeuronSDK {
     };
 
     return this.enqueueEvent<T>(payload);
+  }
+
+  /**
+   * Record a search your own engine ran, as an event. It weighs into the
+   * user's recommendations by the weight of your Search event, like any
+   * click or purchase. Use search() instead when you also want NSL's
+   * recommendations back in the same call.
+   * POST /v1/events
+   */
+  public async trackSearch<T = {success: true; id?: number}>(
+    data: Omit<TrackEventPayload, "itemId" | "item_id" | "query"> & {query: string}
+  ): Promise<T> {
+    if (!normalizeOptionalString(data?.query)) {
+      throw new Error("query is required");
+    }
+    return this.trackEvent<T>(data);
   }
 
   /**
