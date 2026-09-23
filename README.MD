@@ -141,6 +141,7 @@ one explicitly.
 | Method | Required fields | Notes |
 | --- | --- | --- |
 | `trackEvent(data)` | `eventId` (integer), `userId` (string or number), `itemId` (integer) | IDs must be the values created/returned by NSL. Optional `contextId` is also an integer. |
+| `trackSearch(data)` | `userId` (string or number), `query` (string) | Records a search as an event. Optional `resultItemIds` (integers your engine showed) and `eventId` (defaults to your Search event). |
 | `upsertItem(data)` | `name`, `description`, `metadata` | Creates catalogue entries and returns an NSL-generated integer `id`. |
 | `patchItem(data)` | `itemId` (integer) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
 | `deleteItems(items)` | `itemId` (integer) | Deletes one or more NSL-generated item IDs. |
@@ -172,6 +173,28 @@ const results = await sdk.search({
 ```
 
 The response uses the same list envelope and recommendation item shape as `getRecommendations()`, with `url: "/v1/search"` and `query` included for attribution. The SDK captures the returned `request_id` so subsequent `trackEvent()` calls can be linked to the search result set.
+
+### Searches steer recommendations
+
+Every search is recorded as an event on your Search event type and weighs into that user's later recommendations by its weight, exactly as a click or a purchase does. There are three ways to send one:
+
+```ts
+// NSL runs the search.
+await sdk.search({ query: "waterproof trail shoes", userId: "user-123" });
+
+// Your engine ran it: record it with the ids it showed, and get
+// recommendations that complement them (those ids are left out).
+const extras = await sdk.search({
+  query: "waterproof trail shoes",
+  userId: "user-123",
+  resultItemIds: [1042, 1077, 1013],
+});
+
+// Record only.
+await sdk.trackSearch({ userId: "user-123", query: "waterproof trail shoes", resultItemIds: [1042, 1077] });
+```
+
+The results you send are kept as impressions, not as items the user chose. When searches steered a `getRecommendations()` response it carries `search_intent`, with their share of the user's recent event weight and the queries involved.
 
 ## Development
 
