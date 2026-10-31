@@ -355,6 +355,68 @@ export type RecommendationsResponse = {
   done?: boolean;
 };
 
+/** One rail of a page, for getRecommendationSets(). */
+export type RecommendationSetRequest = {
+  /** Your name for the set, unique within the call; results come back under it. */
+  key: string;
+  contextId: number;
+  limit?: number;
+  /** Seed item for a "more like this" rail. */
+  itemId?: number;
+  cartItemIds?: number[];
+  pageType?: string;
+  /** Filter shorthand, e.g. `category:shoes`. */
+  filters?: string[];
+  scope?: Record<string, unknown>;
+  /** Turns this set into a search. */
+  query?: string;
+};
+
+export type RecommendationSetsOptions = {
+  /** At least one of userId or anonymousId identifies the visitor. */
+  userId?: number | string;
+  anonymousId?: string;
+  sessionId?: string;
+  /**
+   * Makes a retry idempotent: the same requestId bills each set once. One is
+   * generated per call when omitted.
+   */
+  requestId?: string;
+  sets: RecommendationSetRequest[];
+};
+
+export type RecommendationSetError = {
+  type?: string;
+  code?: string;
+  message: string;
+  [k: string]: unknown;
+};
+
+/** One set's result: a full recommendations response, or that set's own error. */
+export type RecommendationSetResult = Omit<RecommendationsResponse, "recommendations"> & {
+  key: string;
+  status: number;
+  /** Attach this to events from this rail, not another set's. */
+  request_id: string;
+  context_id: number;
+  error?: RecommendationSetError;
+  /** Present when the set was served from the API's short-lived reuse cache. */
+  reuse?: {reused: boolean; age_ms: number};
+};
+
+export type RecommendationSetsResponse = {
+  object?: "recommendation_set_list" | string;
+  request_id?: string;
+  /** In the order requested. */
+  results: RecommendationSetResult[];
+  /** The same results keyed by `key`. */
+  sets: Record<string, RecommendationSetResult>;
+  usage?: {sets: number; computed: number; reused: number; coalesced: number};
+};
+
+/** The most sets the API serves in one batch; larger calls are split. */
+export const MAX_RECOMMENDATION_SETS_PER_BATCH = 8;
+
 export type SearchResponse = RecommendationsResponse & {
   query?: string;
   url?: "/v1/search" | string;
@@ -691,6 +753,21 @@ const generateSessionId = (): string => {
     .toString(36)
     .slice(2)}`;
 };
+
+/** A version 4 UUID, which the API accepts as an idempotency key. */
+const generateRequestUuid = (): string => {
+  try {
+    const g: any = globalThis as any;
+    if (typeof g?.crypto?.randomUUID === "function") return g.crypto.randomUUID();
+  } catch {}
+  const bytes = Array.from({length: 16}, () => Math.floor(Math.random() * 256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
+
+const RECOMMENDATION_SET_KEY = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 export class NeuronSDK {
   private baseUrl: string;
@@ -1453,6 +1530,88 @@ export class NeuronSDK {
     }
 
     return res;
+  }
+
+  /**
+   * Get every recommendation rail a page needs in one request.
+   * POST /v1/recommendations/batch
+   *
+   * Each set is served and billed on its own, with its own request_id for
+   * event attribution, but the visitor's state is read once for the page. A
+   * set that fails carries its own `error` without failing the others. More
+   * than MAX_RECOMMENDATION_SETS_PER_BATCH sets are split into parallel
+   * batches.
+   */
+  public async getRecommendationSets(
+    options: RecommendationSetsOptions
+  ): Promise<RecommendationSetsResponse> {
+    const {userId, anonymousId, sessionId, sets} = options;
+    if (userId !== undefined && typeof userId !== "number" && typeof userId !== "string") {
+      throw new Error("userId must be a string or number");
+    }
+    if (!Array.isArray(sets) || sets.length === 0) throw new Error("sets must be a non-empty array");
+    const keys = new Set<string>();
+    for (const set of sets) {
+      if (!RECOMMENDATION_SET_KEY.test(String(set?.key ?? ""))) {
+        throw new Error(`Set key "${set?.key}" must match ${RECOMMENDATION_SET_KEY.source}`);
+      }
+      if (keys.has(set.key)) throw new Error(`Duplicate set key "${set.key}"`);
+      keys.add(set.key);
+      if (!isPositiveInteger(set.contextId)) throw new Error(`Set "${set.key}": contextId must be a positive integer`);
+    }
+
+    const requestId = options.requestId ?? generateRequestUuid();
+    const chunks: RecommendationSetRequest[][] = [];
+    for (let i = 0; i < sets.length; i += MAX_RECOMMENDATION_SETS_PER_BATCH) {
+      chunks.push(sets.slice(i, i + MAX_RECOMMENDATION_SETS_PER_BATCH));
+    }
+
+    const responses = await Promise.all(chunks.map((chunk, index) => {
+      // Each chunk is its own batch, so each needs its own idempotency key.
+      const chunkRequestId = index === 0 ? requestId : generateRequestUuid();
+      const body = {
+        request_id: chunkRequestId,
+        ...(userId !== undefined ? {user_id: String(userId)} : {}),
+        ...(anonymousId ? {anonymous_id: anonymousId} : {}),
+        ...(sessionId ? {session_id: sessionId} : {}),
+        requests: chunk.map((set) => ({
+          key: set.key,
+          context_id: set.contextId,
+          ...(set.limit !== undefined ? {limit: set.limit} : {}),
+          ...(set.itemId !== undefined ? {item_id: set.itemId} : {}),
+          ...(set.cartItemIds?.length ? {cart_item_ids: set.cartItemIds} : {}),
+          ...(set.pageType ? {page_type: set.pageType} : {}),
+          ...(set.filters?.length ? {filters: set.filters} : {}),
+          ...(set.scope ? {scope: set.scope} : {}),
+          ...(set.query ? {query: set.query} : {}),
+        })),
+      };
+      return this.request<Omit<RecommendationSetsResponse, "sets">>("/recommendations/batch", {
+        method: "POST",
+        // The id travels in the body only: a custom header would fail the
+        // API's CORS preflight for browser callers.
+        headers: this.getHeaders(),
+        body: JSON.stringify(body),
+      });
+    }));
+
+    const results = responses.flatMap((response) => response?.results ?? []);
+    const usage = responses.reduce(
+      (total, response) => ({
+        sets: total.sets + (response?.usage?.sets ?? 0),
+        computed: total.computed + (response?.usage?.computed ?? 0),
+        reused: total.reused + (response?.usage?.reused ?? 0),
+        coalesced: total.coalesced + (response?.usage?.coalesced ?? 0),
+      }),
+      {sets: 0, computed: 0, reused: 0, coalesced: 0},
+    );
+    return {
+      object: "recommendation_set_list",
+      request_id: requestId,
+      results,
+      sets: Object.fromEntries(results.map((result) => [result.key, result])),
+      usage,
+    };
   }
 
   /**

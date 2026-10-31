@@ -58,6 +58,30 @@ const results = await sdk.search({
 });
 ```
 
+### Several rails on one page
+
+A page with several recommendation rails should fetch them together. One
+request reads the visitor's state once for the whole page, and each set is
+still served, attributed and billed on its own.
+
+```ts
+const page = await sdk.getRecommendationSets({
+  userId: "42",
+  sets: [
+    {key: "for_you", contextId: 101, limit: 12},
+    {key: "trending", contextId: 102, limit: 8},
+    {key: "similar", contextId: 103, limit: 4, itemId: 5501},
+  ],
+});
+
+page.sets.for_you.data;        // the items for that rail
+page.sets.similar.request_id;  // pass this with events from that rail
+page.sets.trending.error;      // set only if that one rail failed
+```
+
+Up to 8 sets go in one request; the SDK splits larger calls. Pass
+`requestId` to make a retry idempotent: the same id never bills a set twice.
+
 ## Server authentication
 
 Configure exactly one authentication method: `accessToken`, `tokenProvider`,
@@ -146,6 +170,7 @@ one explicitly.
 | `patchItem(data)` | `itemId` (integer) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
 | `deleteItems(items)` | `itemId` (integer) | Deletes one or more NSL-generated item IDs. |
 | `getRecommendations(options)` | `userId` (string or number) | Optional: `contextId` (integer), `limit` (number). |
+| `getRecommendationSets(options)` | `sets` (array of `{key, contextId}`) | Every rail of a page in one request (`POST /v1/recommendations/batch`). Optional: `userId`, `anonymousId`, `sessionId`, `requestId`; per set `limit`, `itemId`, `cartItemIds`, `pageType`, `filters`, `scope`, `query`. |
 | `search(options)` | `query` (string) | Posts query-driven retrieval requests to the Core API `/v1/search` AWS API Gateway endpoint. Optional: `userId`, `contextId`, `limit`, `filter`, `scope`, and hybrid search tuning fields. |
 
 ### Event batching behavior
