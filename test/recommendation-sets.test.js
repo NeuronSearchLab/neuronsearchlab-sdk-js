@@ -47,7 +47,7 @@ test("getRecommendationSets sends every rail in one batch request", async () => 
   assert.equal(requests[0].body.user_id, "u1");
   assert.equal(requests[0].body.session_id, "s1");
   assert.match(requests[0].body.request_id, UUID);
-  assert.equal(new Headers(requests[0].init.headers).get("x-request-id"), requests[0].body.request_id);
+  assert.equal(new Headers(requests[0].init.headers).get("x-request-id"), null);
 
   assert.deepEqual(response.results.map((result) => result.key), ["for_you", "similar"]);
   assert.equal(response.sets.similar.request_id, "similar-id");

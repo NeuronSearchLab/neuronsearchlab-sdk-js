@@ -1588,7 +1588,9 @@ export class NeuronSDK {
       };
       return this.request<Omit<RecommendationSetsResponse, "sets">>("/recommendations/batch", {
         method: "POST",
-        headers: this.getHeaders({"X-Request-Id": chunkRequestId}),
+        // The id travels in the body only: a custom header would fail the
+        // API's CORS preflight for browser callers.
+        headers: this.getHeaders(),
         body: JSON.stringify(body),
       });
     }));
