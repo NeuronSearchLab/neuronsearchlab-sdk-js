@@ -357,8 +357,12 @@ export type RecommendationsResponse = {
 
 /** One rail of a page, for getRecommendationSets(). */
 export type RecommendationSetRequest = {
-  /** Your name for the set, unique within the call; results come back under it. */
-  key: string;
+  /**
+   * Your name for the set, unique within the call; results come back under it.
+   * In a group request a set for one of the group's contexts may leave it out:
+   * that rail keeps its default key, the context key.
+   */
+  key?: string;
   contextId: number;
   limit?: number;
   /** Seed item for a "more like this" rail. */
@@ -382,7 +386,17 @@ export type RecommendationSetsOptions = {
    * generated per call when omitted.
    */
   requestId?: string;
-  sets: RecommendationSetRequest[];
+  /**
+   * Serve every rail of a context group (Contexts page, "Load this group").
+   * Each rail comes back under its context key, in the group's order, and the
+   * group's rules apply. With a group, `sets` is optional: a set for one of
+   * the group's contexts adjusts that rail, and a set for another context is
+   * served alongside.
+   */
+  groupId?: number;
+  /** Size of every rail in a group request (default 20). */
+  limit?: number;
+  sets?: RecommendationSetRequest[];
 };
 
 export type RecommendationSetError = {
@@ -407,6 +421,8 @@ export type RecommendationSetResult = Omit<RecommendationsResponse, "recommendat
 export type RecommendationSetsResponse = {
   object?: "recommendation_set_list" | string;
   request_id?: string;
+  /** Echoed for a group request. */
+  group_id?: number;
   /** In the order requested. */
   results: RecommendationSetResult[];
   /** The same results keyed by `key`. */
@@ -1540,30 +1556,48 @@ export class NeuronSDK {
    * event attribution, but the visitor's state is read once for the page. A
    * set that fails carries its own `error` without failing the others. More
    * than MAX_RECOMMENDATION_SETS_PER_BATCH sets are split into parallel
-   * batches.
+   * batches. Pass `groupId` to load a context group's rails by its ID; a
+   * group request is always one batch.
    */
   public async getRecommendationSets(
     options: RecommendationSetsOptions
   ): Promise<RecommendationSetsResponse> {
-    const {userId, anonymousId, sessionId, sets} = options;
+    const {userId, anonymousId, sessionId, groupId, limit} = options;
+    const sets = options.sets ?? [];
     if (userId !== undefined && typeof userId !== "number" && typeof userId !== "string") {
       throw new Error("userId must be a string or number");
     }
-    if (!Array.isArray(sets) || sets.length === 0) throw new Error("sets must be a non-empty array");
+    if (groupId !== undefined && !isPositiveInteger(groupId)) throw new Error("groupId must be a positive integer");
+    if (limit !== undefined && groupId === undefined) {
+      throw new Error("limit applies to a group request; give each set its own limit");
+    }
+    if (!Array.isArray(sets) || (sets.length === 0 && groupId === undefined)) {
+      throw new Error("sets must be a non-empty array, or pass a groupId");
+    }
     const keys = new Set<string>();
     for (const set of sets) {
+      // A group request may adjust one of the group's rails without naming it.
+      if (groupId !== undefined && set?.key === undefined) {
+        if (!isPositiveInteger(set?.contextId)) throw new Error("A group rail adjustment needs a positive integer contextId");
+        continue;
+      }
       if (!RECOMMENDATION_SET_KEY.test(String(set?.key ?? ""))) {
         throw new Error(`Set key "${set?.key}" must match ${RECOMMENDATION_SET_KEY.source}`);
       }
-      if (keys.has(set.key)) throw new Error(`Duplicate set key "${set.key}"`);
-      keys.add(set.key);
-      if (!isPositiveInteger(set.contextId)) throw new Error(`Set "${set.key}": contextId must be a positive integer`);
+      const key = set.key as string;
+      if (keys.has(key)) throw new Error(`Duplicate set key "${key}"`);
+      keys.add(key);
+      if (!isPositiveInteger(set.contextId)) throw new Error(`Set "${key}": contextId must be a positive integer`);
     }
 
     const requestId = options.requestId ?? generateRequestUuid();
+    // The server expands a group, so a group request cannot be split here.
     const chunks: RecommendationSetRequest[][] = [];
-    for (let i = 0; i < sets.length; i += MAX_RECOMMENDATION_SETS_PER_BATCH) {
-      chunks.push(sets.slice(i, i + MAX_RECOMMENDATION_SETS_PER_BATCH));
+    if (groupId !== undefined) chunks.push(sets);
+    else {
+      for (let i = 0; i < sets.length; i += MAX_RECOMMENDATION_SETS_PER_BATCH) {
+        chunks.push(sets.slice(i, i + MAX_RECOMMENDATION_SETS_PER_BATCH));
+      }
     }
 
     const responses = await Promise.all(chunks.map((chunk, index) => {
@@ -1574,8 +1608,10 @@ export class NeuronSDK {
         ...(userId !== undefined ? {user_id: String(userId)} : {}),
         ...(anonymousId ? {anonymous_id: anonymousId} : {}),
         ...(sessionId ? {session_id: sessionId} : {}),
+        ...(groupId !== undefined ? {group_id: groupId} : {}),
+        ...(limit !== undefined ? {limit} : {}),
         requests: chunk.map((set) => ({
-          key: set.key,
+          ...(set.key !== undefined ? {key: set.key} : {}),
           context_id: set.contextId,
           ...(set.limit !== undefined ? {limit: set.limit} : {}),
           ...(set.itemId !== undefined ? {item_id: set.itemId} : {}),
@@ -1608,6 +1644,7 @@ export class NeuronSDK {
     return {
       object: "recommendation_set_list",
       request_id: requestId,
+      ...(groupId !== undefined ? {group_id: groupId} : {}),
       results,
       sets: Object.fromEntries(results.map((result) => [result.key, result])),
       usage,

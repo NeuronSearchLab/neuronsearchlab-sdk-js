@@ -82,6 +82,26 @@ page.sets.trending.error;      // set only if that one rail failed
 Up to 8 sets go in one request; the SDK splits larger calls. Pass
 `requestId` to make a retry idempotent: the same id never bills a set twice.
 
+#### Load a context group
+
+Group the rails on the Contexts page, then load them by the group's ID (shown
+next to the group's name). Each rail comes back under its context key, in the
+group's order, and the group's rules (no repeats, keep rails full, per-attribute
+caps) apply:
+
+```ts
+const page = await sdk.getRecommendationSets({userId: "42", groupId: 12, limit: 12});
+
+page.sets.homepage_for_you.data;
+
+// Adjust one rail, e.g. seed "similar items" with the product on screen:
+await sdk.getRecommendationSets({
+  userId: "42",
+  groupId: 12,
+  sets: [{contextId: 103, itemId: 5501}],
+});
+```
+
 ## Server authentication
 
 Configure exactly one authentication method: `accessToken`, `tokenProvider`,
@@ -170,7 +190,7 @@ one explicitly.
 | `patchItem(data)` | `itemId` (integer) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
 | `deleteItems(items)` | `itemId` (integer) | Deletes one or more NSL-generated item IDs. |
 | `getRecommendations(options)` | `userId` (string or number) | Optional: `contextId` (integer), `limit` (number). |
-| `getRecommendationSets(options)` | `sets` (array of `{key, contextId}`) | Every rail of a page in one request (`POST /v1/recommendations/batch`). Optional: `userId`, `anonymousId`, `sessionId`, `requestId`; per set `limit`, `itemId`, `cartItemIds`, `pageType`, `filters`, `scope`, `query`. |
+| `getRecommendationSets(options)` | `sets` (array of `{key, contextId}`), or `groupId` | Every rail of a page in one request (`POST /v1/recommendations/batch`). Optional: `userId`, `anonymousId`, `sessionId`, `requestId`, `groupId` with `limit`; per set `limit`, `itemId`, `cartItemIds`, `pageType`, `filters`, `scope`, `query`. |
 | `search(options)` | `query` (string) | Posts query-driven retrieval requests to the Core API `/v1/search` AWS API Gateway endpoint. Optional: `userId`, `contextId`, `limit`, `filter`, `scope`, and hybrid search tuning fields. |
 
 ### Event batching behavior

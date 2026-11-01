@@ -94,3 +94,37 @@ test("rejects invalid sets before calling the API", async () => {
   await assert.rejects(() => sdk.getRecommendationSets({userId: "u", sets: [{key: "a", contextId: 0}]}), /contextId/);
   assert.equal(requests.length, 0);
 });
+
+test("a groupId loads every rail of a context group in one batch", async () => {
+  const {sdk, requests} = sdkRecording((body) => ({
+    object: "recommendation_set_list",
+    group_id: body.group_id,
+    results: [
+      {key: "for_you", status: 200, request_id: "a", context_id: 2323, data: []},
+      {key: "similar", status: 200, request_id: "b", context_id: 2324, data: []},
+    ],
+    usage: {sets: 2, computed: 2, reused: 0, coalesced: 0},
+  }));
+  const response = await sdk.getRecommendationSets({
+    userId: "u1",
+    groupId: 12,
+    limit: 6,
+    sets: [{contextId: 2324, itemId: 3187}],
+  });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.group_id, 12);
+  assert.equal(requests[0].body.limit, 6);
+  assert.deepEqual(requests[0].body.requests, [{context_id: 2324, item_id: 3187}]);
+  assert.equal(response.group_id, 12);
+  assert.deepEqual(Object.keys(response.sets), ["for_you", "similar"]);
+});
+
+test("a group request needs no sets, and limit needs a group", async () => {
+  const {sdk, requests} = sdkRecording(ok);
+  await sdk.getRecommendationSets({userId: "u1", groupId: 12});
+  assert.deepEqual(requests[0].body.requests, []);
+  await assert.rejects(() => sdk.getRecommendationSets({userId: "u", groupId: 0}), /groupId/);
+  await assert.rejects(() => sdk.getRecommendationSets({userId: "u", limit: 5, sets: [{key: "a", contextId: 1}]}), /group request/);
+  await assert.rejects(() => sdk.getRecommendationSets({userId: "u", sets: [{contextId: 1}]}), /must match/);
+});
