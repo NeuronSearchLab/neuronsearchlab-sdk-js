@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
 import {afterEach, beforeEach, test} from "node:test";
 
-import {NeuronSDK} from "../dist/index.cjs";
+import {NeuronSDK, SDK_CLIENT} from "../dist/index.cjs";
 
 /** A localStorage stand-in that records every write. */
 function fakeStorage(initial = {}) {
@@ -326,4 +327,45 @@ test("an expired stored session is not restored", () => {
   const {sdk} = sdkRecording({persistence: "localStorage"});
   assert.notEqual(sdk.getSessionId(), "old-session");
   assert.equal(storage.data.get("nsl_sid"), sdk.getSessionId());
+});
+
+test("events carry platform and client tags in the body", async () => {
+  const {version} = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(SDK_CLIENT, `js-sdk/${version}`);
+
+  const {sdk, requests} = sdkRecording();
+  await sdk.trackEvent({eventId: 41, itemId: 1});
+  const event = firstEvent(requests[0]);
+  assert.equal(event.platform, "server");
+  assert.equal(event.client, `js-sdk/${version}`);
+  assert.match(event.client, /^[A-Za-z0-9._+/-]{1,64}$/);
+
+  const headers = new Headers(requests[0].init.headers);
+  assert.equal(headers.get("x-nsl-platform"), null);
+  assert.deepEqual([...headers.keys()].sort(), ["authorization", "content-type"]);
+});
+
+test("platform is web in a browser runtime", async () => {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  globalThis.window = {addEventListener() {}};
+  globalThis.document = {visibilityState: "visible"};
+  try {
+    const {sdk, requests} = sdkRecording();
+    await sdk.trackEvent({eventId: 41, itemId: 1});
+    assert.equal(firstEvent(requests[0]).platform, "web");
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test("config and per-event platform override the detected one", async () => {
+  const {sdk, requests} = sdkRecording({platform: "magento"});
+  await sdk.trackEvent({eventId: 41, itemId: 1});
+  assert.equal(firstEvent(requests[0]).platform, "magento");
+  await sdk.trackEvent({eventId: 41, itemId: 1, platform: "ios"});
+  assert.equal(firstEvent(requests[1]).platform, "ios");
 });

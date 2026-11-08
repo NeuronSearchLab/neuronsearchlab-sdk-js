@@ -134,6 +134,13 @@ Withdrawing consent removes the stored keys and replaces both ids, so nothing
 before links to what comes after. Every storage access is guarded: private
 browsing or blocked site data only means the ids don't survive a reload.
 
+Every event also carries `platform` and `client` in its body, so the console
+can show where it came from. `platform` is `"web"` in a browser and `"server"`
+elsewhere; integrations set their own with the `platform` config (`ios`,
+`android`, `magento`, `shopify`, `woocommerce`, `bigcommerce`, `prestashop`,
+`shopware`), or per event. `client` is `js-sdk/<version>`. They travel in the
+body rather than as headers, so browser calls need no extra CORS preflight.
+
 The SDK-managed session id rotates after 30 minutes without an event
 (`sessionTimeoutMs`). A session id you set yourself, through `sessionId` or
 `setSessionId()`, is never rotated.
@@ -211,6 +218,7 @@ one explicitly.
 | `sessionId` | Generated | A fixed session id. One you set is never rotated. |
 | `autoSessionId` | `true` | Generate and manage a session id when none is set. |
 | `sessionTimeoutMs` | `1800000` | Inactivity after which the SDK-managed session id rotates. |
+| `platform` | `"web"` / `"server"` | Sent as `platform` on every event; detected from the runtime unless set (e.g. `"magento"`). |
 
 ### Resources
 

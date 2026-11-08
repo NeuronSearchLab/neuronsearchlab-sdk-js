@@ -4,7 +4,28 @@ import {logger} from "./logger";
 import {
   AccessTokenManager,
   SDKAuthError,
+  isBrowserRuntime,
 } from "./auth";
+
+// Replaced with package.json's version by tsup (see tsup.config.js).
+declare const __SDK_VERSION__: string;
+const SDK_VERSION = typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0";
+
+/** Sent as `client` on every event, so the console can show the source. */
+export const SDK_CLIENT = `js-sdk/${SDK_VERSION}`;
+
+/** Where events come from. The API drops values outside this list. */
+export type EventPlatform =
+  | "web"
+  | "ios"
+  | "android"
+  | "server"
+  | "magento"
+  | "shopify"
+  | "woocommerce"
+  | "bigcommerce"
+  | "prestashop"
+  | "shopware";
 import type {
   OAuthClientCredentialsConfig,
   TokenProvider,
@@ -91,6 +112,12 @@ type SDKBaseConfig = {
   consent?: boolean;
 
   /**
+   * Sent as `platform` on every event. Defaults to "web" in a browser and
+   * "server" elsewhere; integrations set their own, e.g. "magento".
+   */
+  platform?: EventPlatform;
+
+  /**
    * Refresh cached provider/OAuth tokens this long before their expiry.
    * The effective skew is capped at half of a token's lifetime. Default: 60s.
    */
@@ -175,6 +202,8 @@ export type TrackEventPayload = {
   /** Defaults to the SDK's anonymous id. */
   anonymousId?: string;
   anonymous_id?: string;
+  /** Defaults to the SDK's platform (config.platform, else web/server). */
+  platform?: EventPlatform;
   itemId?: number;
   item_id?: number;
   contextId?: number;
@@ -915,6 +944,7 @@ export class NeuronSDK {
   private currentUserId: string | null = null;
   private persistence: "memory" | "localStorage";
   private consent: boolean;
+  private platform: EventPlatform;
 
   constructor(config: SDKConfig) {
     if (!config?.baseUrl) {
@@ -947,6 +977,10 @@ export class NeuronSDK {
 
     this.propagateRecommendationRequestId =
       config.propagateRecommendationRequestId ?? true;
+
+    this.platform =
+      (normalizeOptionalString(config.platform) as EventPlatform | null) ??
+      (isBrowserRuntime() ? "web" : "server");
 
     // identity + storage config
     this.persistence = config.persistence === "localStorage" ? "localStorage" : "memory";
@@ -1671,6 +1705,10 @@ export class NeuronSDK {
       // normalize + attach
       ...(ridToAttach ? {request_id: ridToAttach} : {}),
       ...(sidToAttach ? {session_id: sidToAttach} : {}),
+
+      // In the body, not headers: a custom header fails browsers' CORS preflight.
+      platform: normalizeOptionalString(normalized.platform) ?? this.platform,
+      client: SDK_CLIENT,
 
       client_ts: new Date().toISOString(),
     };
