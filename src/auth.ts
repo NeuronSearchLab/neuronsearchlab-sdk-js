@@ -90,7 +90,7 @@ const preserveNonBlank = (value: unknown): string | null => {
   return value;
 };
 
-const isBrowserRuntime = (): boolean =>
+export const isBrowserRuntime = (): boolean =>
   typeof window !== "undefined" || typeof document !== "undefined";
 
 const normalizeTokenUrl = (value?: string): string => {
