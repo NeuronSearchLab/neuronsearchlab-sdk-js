@@ -82,6 +82,62 @@ page.sets.trending.error;      // set only if that one rail failed
 Up to 8 sets go in one request; the SDK splits larger calls. Pass
 `requestId` to make a retry idempotent: the same id never bills a set twice.
 
+## Identity: anonymous, identified, reset
+
+Every SDK instance has an anonymous id. Events and recommendation calls that
+leave out `userId` use it as `user_id`, and always send it as `anonymous_id`,
+so a visitor gets their own recommendations before they sign in.
+
+```ts
+await sdk.trackEvent({eventId: 41, itemId: 5501}); // user_id = anonymous id
+await sdk.getRecommendations({contextId: 101});    // same visitor
+
+// They signed in: their anonymous history moves onto the user, and later
+// calls default to them, on this device and any other they sign in on.
+const {linked, events_moved} = await sdk.identify("user-123");
+
+// They signed out: fresh anonymous id and session, no user.
+sdk.reset();
+```
+
+`identify()` calls `POST /v1/identify`, which needs the write scope.
+Identifying the current user again makes no request, and a failed call leaves
+the visitor anonymous so you can retry. Call `reset()` before identifying a
+different user on the same device. `getAnonymousId()` and `getUserId()` read
+the current values.
+
+On a server, one instance serves many visitors, so keep passing `userId` on
+each call and link a visitor by the anonymous id their browser sent you. That
+form leaves the instance's default user alone:
+
+```ts
+await sdk.identify(session.userId, {anonymousId: req.cookies.nsl_aid});
+```
+
+In a browser, ids live in memory unless you opt in to `localStorage`. They are
+then stored under `nsl_aid`, `nsl_sid` and `nsl_sid_ts`, the keys the
+nsl-embed widget uses, so both see one visitor. Nothing is read or written
+while consent is withheld:
+
+```ts
+const sdk = new NeuronSDK({
+  baseUrl: "https://api.neuronsearchlab.com/v1",
+  tokenProvider: () => fetch("/api/nsl-token").then((r) => r.text()),
+  persistence: "localStorage",
+  consent: cookieBanner.analyticsAllowed(),
+});
+
+cookieBanner.onChange((allowed) => sdk.setConsent(allowed));
+```
+
+Withdrawing consent removes the stored keys and replaces both ids, so nothing
+before links to what comes after. Every storage access is guarded: private
+browsing or blocked site data only means the ids don't survive a reload.
+
+The SDK-managed session id rotates after 30 minutes without an event
+(`sessionTimeoutMs`). A session id you set yourself, through `sessionId` or
+`setSessionId()`, is never rotated.
+
 ## Server authentication
 
 Configure exactly one authentication method: `accessToken`, `tokenProvider`,
@@ -149,6 +205,12 @@ one explicitly.
 | `maxBufferedEvents` | `5000` | Maximum number of buffered events; oldest are dropped (with a warning) beyond this limit. |
 | `maxEventRetries` | `5` | Event send retries (with exponential backoff) after network failures. |
 | `disableArrayBatching` | `false` | Force single-event sends (used automatically if the server rejects array payloads). |
+| `anonymousId` | Generated | The visitor's anonymous id; the fallback `user_id` until `identify()`. |
+| `persistence` | `"memory"` | `"localStorage"` keeps the anonymous and session ids across page loads (`nsl_aid`, `nsl_sid`, `nsl_sid_ts`). |
+| `consent` | `true` | While `false`, nothing is read from or written to storage. Change with `setConsent()`. |
+| `sessionId` | Generated | A fixed session id. One you set is never rotated. |
+| `autoSessionId` | `true` | Generate and manage a session id when none is set. |
+| `sessionTimeoutMs` | `1800000` | Inactivity after which the SDK-managed session id rotates. |
 
 ### Resources
 
@@ -164,13 +226,16 @@ one explicitly.
 
 | Method | Required fields | Notes |
 | --- | --- | --- |
-| `trackEvent(data)` | `eventId` (integer), `userId` (string or number), `itemId` (integer) | IDs must be the values created/returned by NSL. Optional `contextId` is also an integer. |
-| `trackSearch(data)` | `userId` (string or number), `query` (string) | Records a search as an event. Optional `resultItemIds` (integers your engine showed) and `eventId` (defaults to your Search event). |
+| `trackEvent(data)` | `eventId` (integer), `itemId` (integer) | IDs must be the values created/returned by NSL. `userId` defaults to the identified user, else the anonymous id. Optional `contextId` is also an integer. |
+| `trackSearch(data)` | `query` (string) | Records a search as an event. Optional `resultItemIds` (integers your engine showed) and `eventId` (defaults to your Search event). |
 | `upsertItem(data)` | `name`, `description`, `metadata` | Creates catalogue entries and returns an NSL-generated integer `id`. |
 | `patchItem(data)` | `itemId` (integer) plus one or more update fields | Updates an existing catalogue entry via `/v1/items/{item_id}`. |
 | `deleteItems(items)` | `itemId` (integer) | Deletes one or more NSL-generated item IDs. |
-| `getRecommendations(options)` | `userId` (string or number) | Optional: `contextId` (integer), `limit` (number). |
+| `getRecommendations(options)` | — | Optional: `userId` (defaults as for events), `contextId` (integer), `limit` (number). |
 | `getRecommendationSets(options)` | `sets` (array of `{key, contextId}`) | Every rail of a page in one request (`POST /v1/recommendations/batch`). Optional: `userId`, `anonymousId`, `sessionId`, `requestId`; per set `limit`, `itemId`, `cartItemIds`, `pageType`, `filters`, `scope`, `query`. |
+| `identify(userId, opts?)` | `userId` (string or number) | Links the anonymous id to the user (`POST /v1/identify`) and makes them the default. `opts.anonymousId` links another visitor's id without changing the default. Returns `{linked, events_moved}`. |
+| `reset()` | — | New anonymous and session ids; forgets the user and the remembered `request_id`. |
+| `setConsent(granted)` | `granted` (boolean) | Gates storage; withdrawing removes the stored ids and rotates them. |
 | `search(options)` | `query` (string) | Posts query-driven retrieval requests to the Core API `/v1/search` AWS API Gateway endpoint. Optional: `userId`, `contextId`, `limit`, `filter`, `scope`, and hybrid search tuning fields. |
 
 ### Event batching behavior

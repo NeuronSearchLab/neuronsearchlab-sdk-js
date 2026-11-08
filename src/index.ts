@@ -62,6 +62,35 @@ type SDKBaseConfig = {
   autoSessionId?: boolean;
 
   /**
+   * Inactivity after which an SDK-managed session id is replaced, in ms.
+   * Default 30 minutes. A sessionId you set yourself (config or setSessionId)
+   * is never rotated.
+   */
+  sessionTimeoutMs?: number;
+
+  /**
+   * The visitor's anonymous id. One is generated when omitted (or read back
+   * from storage when persistence is "localStorage"). Events and
+   * recommendations fall back to it as user_id until identify() is called.
+   */
+  anonymousId?: string;
+
+  /**
+   * Where the anonymous and session ids live. "memory" (default) keeps them on
+   * this instance only, which is what a server wants. "localStorage" keeps
+   * them in the browser under nsl_aid / nsl_sid / nsl_sid_ts, the keys the
+   * nsl-embed widget uses, and only while consent is granted.
+   */
+  persistence?: "memory" | "localStorage";
+
+  /**
+   * Whether the visitor has agreed to identifiers being stored on their
+   * device. Default true. While false nothing is read from or written to
+   * storage. Change it later with setConsent().
+   */
+  consent?: boolean;
+
+  /**
    * Refresh cached provider/OAuth tokens this long before their expiry.
    * The effective skew is capped at half of a token's lifetime. Default: 60s.
    */
@@ -140,8 +169,12 @@ export type TrackEventPayload = {
   event_type?: number;
   eventId?: number;
   event_id?: number;
+  /** Defaults to the identified user, else the anonymous id. */
   userId?: number | string;
   user_id?: number | string;
+  /** Defaults to the SDK's anonymous id. */
+  anonymousId?: string;
+  anonymous_id?: string;
   itemId?: number;
   item_id?: number;
   contextId?: number;
@@ -185,7 +218,8 @@ export type ItemUpsertPayload = {
 };
 
 export type RecommendationOptions = {
-  userId: number | string;
+  /** Defaults to the identified user, else the anonymous id. */
+  userId?: number | string;
   contextId?: number;
   scope?: Record<string, unknown>;
   limit?: number;
@@ -194,7 +228,8 @@ export type RecommendationOptions = {
 };
 
 export type AutoRecommendationsOptions = {
-  userId: number | string;
+  /** Defaults to the identified user, else the anonymous id. */
+  userId?: number | string;
   contextId?: number; // optional: apply the same context filters while filling auto sections
   scope?: Record<string, unknown>;
   limit?: number; // quantity per section
@@ -373,8 +408,9 @@ export type RecommendationSetRequest = {
 };
 
 export type RecommendationSetsOptions = {
-  /** At least one of userId or anonymousId identifies the visitor. */
+  /** Defaults to the identified user, else the anonymous id. */
   userId?: number | string;
+  /** Defaults to the SDK's anonymous id. */
   anonymousId?: string;
   sessionId?: string;
   /**
@@ -443,6 +479,24 @@ export type SearchIntentSummary = {
   }>;
   candidates_added: number;
   candidates_rescored: number;
+};
+
+export type IdentifyOptions = {
+  /**
+   * Link this anonymous id instead of the SDK's own. For a server handling
+   * many visitors: the call then leaves this instance's default user alone,
+   * since the id belongs to someone else's device.
+   */
+  anonymousId?: string;
+};
+
+export type IdentifyResponse = {
+  /** True when the anonymous id's history now belongs to the user. */
+  linked: boolean;
+  /** How many past anonymous events moved onto the user. */
+  events_moved: number;
+  /** Why nothing was linked, when linked is false. */
+  reason?: string;
 };
 
 // Legacy type for backwards compatibility
@@ -532,12 +586,21 @@ const normalizeItemPayload = (input: ItemUpsertPayload): Record<string, unknown>
   return {...input};
 };
 
-const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown> => {
+const normalizeEventPayload = (
+  data: TrackEventPayload,
+  identity: {userId: string; anonymousId: string}
+): Record<string, unknown> => {
   if (!data || typeof data !== "object") {
     throw new Error("event payload must be an object");
   }
 
-  const userId = normalizeNonEmptyString(data.user_id ?? data.userId);
+  const explicitUserId = data.user_id ?? data.userId;
+  const userId =
+    explicitUserId === undefined || explicitUserId === null
+      ? identity.userId
+      : normalizeNonEmptyString(explicitUserId);
+  const anonymousId =
+    normalizeOptionalString(data.anonymous_id ?? data.anonymousId) ?? identity.anonymousId;
   const itemId = data.item_id ?? data.itemId;
   const eventId =
     data.event ?? data.event_id ?? data.eventId ?? data.event_type ?? data.eventType ?? data.type;
@@ -554,14 +617,15 @@ const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown>
   const isSearch = itemId === undefined && query !== null;
   const resultItemIds = data.result_item_ids ?? data.resultItemIds;
 
+  if (!userId) throw new Error("userId must be a non-empty string or number when provided");
+
   if (isSearch) {
-    if (!userId) throw new Error("userId is required");
     if (eventId !== undefined && !isEventId(eventId)) {
       throw new Error("eventId must be a non-zero integer when provided");
     }
-  } else if (!userId || !isPositiveInteger(itemId) || !isEventId(eventId)) {
+  } else if (!isPositiveInteger(itemId) || !isEventId(eventId)) {
     throw new Error(
-      "eventId must be a non-zero integer, itemId must be a positive integer, and userId is required (or send query without itemId for a search event)"
+      "eventId must be a non-zero integer and itemId must be a positive integer (or send query without itemId for a search event)"
     );
   }
 
@@ -603,12 +667,14 @@ const normalizeEventPayload = (data: TrackEventPayload): Record<string, unknown>
     query: _query,
     resultItemIds: _resultItemIds,
     result_item_ids: _result_item_ids,
+    anonymousId: _anonymousId,
     ...rest
   } = data;
 
   return {
     ...rest,
     user_id: userId,
+    anonymous_id: anonymousId,
     ...(itemId !== undefined ? {item_id: itemId} : {}),
     ...(eventId !== undefined ? {event_id: eventId} : {}),
     ...(query !== null ? {query} : {}),
@@ -769,6 +835,50 @@ const generateRequestUuid = (): string => {
 
 const RECOMMENDATION_SET_KEY = /^[A-Za-z0-9_.:-]{1,64}$/;
 
+// Shared with the nsl-embed widget, so a page running both sees one visitor.
+const ANONYMOUS_ID_KEY = "nsl_aid";
+const SESSION_ID_KEY = "nsl_sid";
+const SESSION_TS_KEY = "nsl_sid_ts";
+const DEFAULT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Storage throws rather than returning null in Safari private mode, sandboxed
+ * iframes and browsers refusing site data; even reading the property can
+ * throw. Every access goes through these, so a blocked store only means the
+ * ids don't survive a reload.
+ */
+const browserLocalStorage = (): Storage | null => {
+  try {
+    const storage = (globalThis as any).localStorage;
+    return storage && typeof storage.getItem === "function" ? storage : null;
+  } catch {
+    return null;
+  }
+};
+
+const readStorage = (storage: Storage | null, key: string): string | null => {
+  if (!storage) return null;
+  try {
+    return normalizeOptionalString(storage.getItem(key));
+  } catch {
+    return null;
+  }
+};
+
+const writeStorage = (storage: Storage | null, key: string, value: string): void => {
+  if (!storage) return;
+  try {
+    storage.setItem(key, value);
+  } catch {}
+};
+
+const removeStorage = (storage: Storage | null, key: string): void => {
+  if (!storage) return;
+  try {
+    storage.removeItem(key);
+  } catch {}
+};
+
 export class NeuronSDK {
   private baseUrl: string;
   private auth: AccessTokenManager;
@@ -795,6 +905,16 @@ export class NeuronSDK {
   // ✅ session_id state
   private autoSessionId: boolean;
   private sessionId: string | null = null;
+  // True while the SDK owns the session id and may rotate it on inactivity.
+  private sessionManaged = false;
+  private sessionTimeoutMs: number;
+  private lastActivityAt = 0;
+
+  // identity state
+  private anonymousId: string;
+  private currentUserId: string | null = null;
+  private persistence: "memory" | "localStorage";
+  private consent: boolean;
 
   constructor(config: SDKConfig) {
     if (!config?.baseUrl) {
@@ -828,15 +948,99 @@ export class NeuronSDK {
     this.propagateRecommendationRequestId =
       config.propagateRecommendationRequestId ?? true;
 
+    // identity + storage config
+    this.persistence = config.persistence === "localStorage" ? "localStorage" : "memory";
+    this.consent = config.consent ?? true;
+    const storage = this.storage();
+
+    const configuredAnonymousId = normalizeOptionalString(config.anonymousId);
+    this.anonymousId =
+      configuredAnonymousId ?? readStorage(storage, ANONYMOUS_ID_KEY) ?? generateSessionId();
+    writeStorage(storage, ANONYMOUS_ID_KEY, this.anonymousId);
+
     // ✅ session config
     this.autoSessionId = config.autoSessionId ?? true;
+    this.sessionTimeoutMs =
+      typeof config.sessionTimeoutMs === "number" && config.sessionTimeoutMs > 0
+        ? config.sessionTimeoutMs
+        : DEFAULT_SESSION_TIMEOUT_MS;
     this.sessionId = normalizeOptionalString(config.sessionId);
 
     if (this.autoSessionId && !this.sessionId) {
-      this.sessionId = generateSessionId();
+      this.sessionManaged = true;
+      const storedSessionId = readStorage(storage, SESSION_ID_KEY);
+      const storedActivityAt = Number(readStorage(storage, SESSION_TS_KEY));
+      if (
+        storedSessionId &&
+        Number.isFinite(storedActivityAt) &&
+        storedActivityAt > 0 &&
+        Date.now() - storedActivityAt < this.sessionTimeoutMs
+      ) {
+        this.sessionId = storedSessionId;
+        this.lastActivityAt = storedActivityAt;
+      } else {
+        this.startManagedSession();
+      }
     }
 
     this.registerLifecycleFlush();
+  }
+
+  /** The browser store, only while persistence is on and consent is granted. */
+  private storage(): Storage | null {
+    if (this.persistence !== "localStorage" || !this.consent) return null;
+    return browserLocalStorage();
+  }
+
+  private persistAnonymousId() {
+    writeStorage(this.storage(), ANONYMOUS_ID_KEY, this.anonymousId);
+  }
+
+  private persistSession() {
+    if (!this.sessionManaged || !this.sessionId) return;
+    const storage = this.storage();
+    writeStorage(storage, SESSION_ID_KEY, this.sessionId);
+    writeStorage(storage, SESSION_TS_KEY, String(this.lastActivityAt));
+  }
+
+  private startManagedSession() {
+    this.sessionManaged = true;
+    this.sessionId = generateSessionId();
+    this.lastActivityAt = Date.now();
+    this.persistSession();
+  }
+
+  /** Replace an SDK-managed session id that has been idle past the timeout. */
+  private rotateSessionIfExpired(now = Date.now()) {
+    if (!this.sessionManaged || !this.autoSessionId) return;
+    if (!this.sessionId || now - this.lastActivityAt >= this.sessionTimeoutMs) {
+      this.startManagedSession();
+    }
+  }
+
+  /** Record activity on the current session (events only). */
+  private touchSession() {
+    if (!this.sessionManaged) return;
+    const now = Date.now();
+    this.rotateSessionIfExpired(now);
+    this.lastActivityAt = now;
+    this.persistSession();
+  }
+
+  /** The user_id calls default to: the identified user, else the anonymous id. */
+  private defaultUserId(): string {
+    return this.currentUserId ?? this.anonymousId;
+  }
+
+  /** A caller's userId, or the default when they left it out. */
+  private resolveUserId(userId: unknown): string {
+    if (userId === undefined || userId === null) return this.defaultUserId();
+    const resolved =
+      typeof userId === "string" || typeof userId === "number"
+        ? normalizeNonEmptyString(userId)
+        : null;
+    if (!resolved) throw new Error("userId must be a non-empty string or number");
+    return resolved;
   }
 
   private registerLifecycleFlush() {
@@ -900,16 +1104,118 @@ export class NeuronSDK {
    */
   public setSessionId(sessionId: string | null) {
     this.sessionId = normalizeOptionalString(sessionId);
-    if (this.autoSessionId && !this.sessionId) {
-      this.sessionId = generateSessionId();
+    if (this.sessionId) {
+      // Yours now: never rotated, never persisted by the SDK.
+      this.sessionManaged = false;
+    } else if (this.autoSessionId) {
+      this.startManagedSession();
+    } else {
+      this.sessionManaged = false;
     }
   }
 
   /**
    * ✅ NEW: Read the current SDK session id (may be null if autoSessionId=false)
+   * An SDK-managed id idle past sessionTimeoutMs is replaced first, so this
+   * is the id the next event will carry.
    */
   public getSessionId(): string | null {
+    this.rotateSessionIfExpired();
     return this.sessionId;
+  }
+
+  /** The anonymous id events and recommendations fall back to. */
+  public getAnonymousId(): string {
+    return this.anonymousId;
+  }
+
+  /** The user set by identify(), or null while the visitor is anonymous. */
+  public getUserId(): string | null {
+    return this.currentUserId;
+  }
+
+  /**
+   * Tie the anonymous visitor to a known user.
+   * POST /v1/identify
+   *
+   * The API moves the anonymous id's past events onto the user and refreshes
+   * their recommendations, so history follows them across devices. Later
+   * calls then default to this user. Identifying the current user again makes
+   * no request. If the request fails the SDK stays anonymous, so a retry
+   * still links.
+   */
+  public async identify(
+    userId: number | string,
+    opts: IdentifyOptions = {}
+  ): Promise<IdentifyResponse> {
+    const user = normalizeNonEmptyString(userId);
+    if (!user) throw new Error("userId must be a non-empty string or number");
+
+    const otherVisitor = normalizeOptionalString(opts.anonymousId);
+    if (!otherVisitor && user === this.currentUserId) {
+      return {linked: false, events_moved: 0, reason: "already_identified"};
+    }
+
+    const res = await this.request<IdentifyResponse>("/identify", {
+      method: "POST",
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        anonymous_id: otherVisitor ?? this.anonymousId,
+        user_id: user,
+        source: "js-sdk",
+      }),
+    });
+
+    if (!otherVisitor || otherVisitor === this.anonymousId) {
+      this.currentUserId = user;
+    }
+    return res;
+  }
+
+  /**
+   * Forget the current visitor, e.g. on logout: a new anonymous id and
+   * session id, no identified user, and no remembered recommendation
+   * request_id. Unsent buffered events keep the ids they were tracked with.
+   */
+  public reset() {
+    this.currentUserId = null;
+    this.lastRecommendationRequestId = null;
+    this.anonymousId = generateSessionId();
+    this.persistAnonymousId();
+    if (this.autoSessionId) {
+      this.startManagedSession();
+    } else {
+      this.sessionId = null;
+      this.sessionManaged = false;
+    }
+  }
+
+  /**
+   * Grant or withdraw consent to store identifiers on the device. Withdrawing
+   * removes the stored ids and replaces them with fresh ones, so nothing from
+   * before links to what comes after. Has no storage effect in memory mode
+   * beyond that rotation.
+   */
+  public setConsent(granted: boolean) {
+    const wasGranted = this.consent;
+    if (granted) {
+      this.consent = true;
+      this.persistAnonymousId();
+      this.persistSession();
+      return;
+    }
+
+    if (this.persistence === "localStorage") {
+      const storage = browserLocalStorage();
+      removeStorage(storage, ANONYMOUS_ID_KEY);
+      removeStorage(storage, SESSION_ID_KEY);
+      removeStorage(storage, SESSION_TS_KEY);
+    }
+    this.consent = false;
+    if (wasGranted) {
+      this.anonymousId = generateSessionId();
+      if (this.sessionManaged) this.startManagedSession();
+    }
   }
 
   private getHeaders(extra?: HeadersInit): HeadersInit {
@@ -1321,7 +1627,10 @@ export class NeuronSDK {
   public async trackEvent<T = {success: true; id?: number}>(
     data: TrackEventPayload
   ): Promise<T> {
-    const normalized = normalizeEventPayload(data);
+    const normalized = normalizeEventPayload(data, {
+      userId: this.defaultUserId(),
+      anonymousId: this.anonymousId,
+    });
 
     // ✅ attach request_id if:
     // - propagation enabled
@@ -1349,8 +1658,9 @@ export class NeuronSDK {
 
     // If autoSessionId enabled but we don't yet have one (edge: setSessionId(null) with autoSessionId=false toggled later)
     if (this.autoSessionId && !this.sessionId) {
-      this.sessionId = generateSessionId();
+      this.startManagedSession();
     }
+    this.touchSession();
 
     const sidToAttach =
       !existingSid && this.sessionId ? this.sessionId : undefined;
@@ -1504,13 +1814,12 @@ export class NeuronSDK {
   public async getRecommendations(
     options: RecommendationOptions
   ): Promise<RecommendationsResponse> {
-    const {userId, contextId, scope, limit, startingAfter, starting_after} = options;
-    if (typeof userId !== "number" && typeof userId !== "string") {
-      throw new Error("userId must be a string or number");
-    }
+    const {contextId, scope, limit, startingAfter, starting_after} = options;
+    const userId = this.resolveUserId(options.userId);
 
     const url = new URL(`${this.baseUrl}/recommendations`);
-    url.searchParams.set("user_id", String(userId));
+    url.searchParams.set("user_id", userId);
+    url.searchParams.set("anonymous_id", this.anonymousId);
     if (contextId !== undefined) {
       if (!isPositiveInteger(contextId)) throw new Error("contextId must be a positive integer");
       url.searchParams.set("context_id", String(contextId));
@@ -1545,10 +1854,9 @@ export class NeuronSDK {
   public async getRecommendationSets(
     options: RecommendationSetsOptions
   ): Promise<RecommendationSetsResponse> {
-    const {userId, anonymousId, sessionId, sets} = options;
-    if (userId !== undefined && typeof userId !== "number" && typeof userId !== "string") {
-      throw new Error("userId must be a string or number");
-    }
+    const {sessionId, sets} = options;
+    const userId = this.resolveUserId(options.userId);
+    const anonymousId = normalizeOptionalString(options.anonymousId) ?? this.anonymousId;
     if (!Array.isArray(sets) || sets.length === 0) throw new Error("sets must be a non-empty array");
     const keys = new Set<string>();
     for (const set of sets) {
@@ -1571,8 +1879,8 @@ export class NeuronSDK {
       const chunkRequestId = index === 0 ? requestId : generateRequestUuid();
       const body = {
         request_id: chunkRequestId,
-        ...(userId !== undefined ? {user_id: String(userId)} : {}),
-        ...(anonymousId ? {anonymous_id: anonymousId} : {}),
+        user_id: userId,
+        anonymous_id: anonymousId,
         ...(sessionId ? {session_id: sessionId} : {}),
         requests: chunk.map((set) => ({
           key: set.key,
@@ -1624,7 +1932,6 @@ export class NeuronSDK {
     options: AutoRecommendationsOptions
   ): Promise<RecommendationsResponse> {
     const {
-      userId,
       contextId,
       scope,
       limit,
@@ -1633,14 +1940,12 @@ export class NeuronSDK {
       candidateLimit,
       servedCap,
     } = options;
-
-    if (typeof userId !== "number" && typeof userId !== "string") {
-      throw new Error("userId must be a string or number");
-    }
+    const userId = this.resolveUserId(options.userId);
 
     const url = new URL(`${this.baseUrl}/recommendations`);
     url.searchParams.set("mode", "auto");
-    url.searchParams.set("user_id", String(userId));
+    url.searchParams.set("user_id", userId);
+    url.searchParams.set("anonymous_id", this.anonymousId);
     if (contextId !== undefined) {
       if (!isPositiveInteger(contextId)) throw new Error("contextId must be a positive integer");
       url.searchParams.set("context_id", String(contextId));
